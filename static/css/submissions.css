@@ -1,0 +1,335 @@
+/* 증빙 제출 포털 */
+
+.portal-link {
+  color: var(--text-accent);
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 6px 14px;
+  border: 1px solid var(--border-highlight);
+  border-radius: 999px;
+}
+.portal-link.danger {
+  color: var(--accent-rose);
+  border-color: rgba(244, 63, 94, 0.35);
+}
+
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  position: relative;
+  z-index: 1;
+}
+.login-panel {
+  width: min(420px, 100%);
+  padding: 32px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(18px);
+}
+.login-mark {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-md);
+  background: var(--gradient-success);
+  font-weight: 900;
+  font-size: 1.4rem;
+  margin-bottom: 18px;
+}
+.login-panel h1 {
+  font-size: 1.55rem;
+  margin-bottom: 4px;
+}
+.login-panel p {
+  color: var(--text-muted);
+  margin-bottom: 22px;
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.login-form label,
+.portal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.login-form span,
+.portal-field label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.login-form input,
+.portal-field select,
+#upload-file {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font-family: var(--font-sans);
+}
+.portal-field select option {
+  background: var(--bg-secondary);
+}
+.login-form input:focus,
+.portal-field select:focus,
+#upload-file:focus {
+  outline: none;
+  border-color: var(--accent-indigo);
+}
+.login-button,
+.portal-button,
+.icon-button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: white;
+  font-family: var(--font-sans);
+  font-weight: 800;
+  cursor: pointer;
+}
+.login-button,
+.portal-button.primary {
+  background: var(--gradient-primary);
+  padding: 10px 16px;
+}
+.portal-button.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-glass);
+  color: var(--text-primary);
+  text-decoration: none;
+  padding: 8px 12px;
+}
+.login-error,
+.portal-empty.error {
+  padding: 10px 12px;
+  background: rgba(244, 63, 94, 0.12);
+  color: #fecdd3;
+  border: 1px solid rgba(244, 63, 94, 0.3);
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+}
+
+.submission-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.submission-stat {
+  padding: 16px 18px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+}
+.submission-stat span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.submission-stat strong {
+  font-size: 1.55rem;
+}
+.submission-stat.ok { border-color: rgba(16, 185, 129, 0.35); }
+.submission-stat.warn { border-color: rgba(245, 158, 11, 0.35); }
+.submission-stat.info { border-color: rgba(6, 182, 212, 0.35); }
+.submission-stat.muted { border-color: rgba(148, 163, 184, 0.2); }
+
+.submission-toolbar {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+  margin-bottom: 18px;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-lg);
+  flex-wrap: wrap;
+}
+.submission-toolbar .portal-field {
+  min-width: 190px;
+}
+
+.submission-content {
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.submission-list {
+  overflow-x: auto;
+}
+.submission-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 1180px;
+}
+.submission-table th,
+.submission-table td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border-glass);
+  vertical-align: top;
+  text-align: left;
+}
+.submission-table th {
+  position: sticky;
+  top: 0;
+  background: rgba(15, 23, 42, 0.95);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  z-index: 2;
+}
+.submission-table tr:hover td {
+  background: rgba(255, 255, 255, 0.025);
+}
+.criterion-cell {
+  color: var(--text-accent);
+  font-weight: 900;
+}
+.task-cell {
+  max-width: 430px;
+  min-width: 320px;
+}
+.muted-text {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+.status-pill {
+  display: inline-flex;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.status-not_submitted {
+  background: rgba(100, 116, 139, 0.15);
+  color: #cbd5e1;
+}
+.status-submitted {
+  background: rgba(6, 182, 212, 0.14);
+  color: #67e8f9;
+}
+.status-revision_requested {
+  background: rgba(245, 158, 11, 0.16);
+  color: #fcd34d;
+}
+.status-approved {
+  background: rgba(16, 185, 129, 0.16);
+  color: #86efac;
+}
+.action-cell {
+  white-space: nowrap;
+}
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 4px 6px 0;
+  padding: 6px 9px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-glass);
+  color: var(--text-primary);
+}
+.icon-button.ok {
+  color: var(--accent-emerald);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.icon-button.warn {
+  color: var(--accent-amber);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.portal-empty {
+  padding: 32px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.portal-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  z-index: 1000;
+  opacity: 0;
+  visibility: hidden;
+  transition: all var(--transition-base);
+}
+.portal-modal.open {
+  opacity: 1;
+  visibility: visible;
+}
+.portal-modal-body {
+  position: relative;
+  width: min(520px, 100%);
+  padding: 26px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+}
+.portal-modal-body.wide {
+  width: min(780px, 100%);
+}
+.portal-modal-body h3 {
+  margin-bottom: 8px;
+}
+.portal-modal-body p {
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+.portal-modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 62vh;
+  overflow: auto;
+}
+.file-version {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+}
+.file-version code {
+  color: var(--text-accent);
+  font-size: 0.76rem;
+}
+
+@media (max-width: 720px) {
+  .submission-toolbar {
+    align-items: stretch;
+  }
+  .submission-toolbar .portal-field,
+  .portal-button.primary {
+    width: 100%;
+  }
+}

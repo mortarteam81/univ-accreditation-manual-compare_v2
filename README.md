@@ -7,6 +7,7 @@
 - Frontend: **HTML + Vanilla JS + CSS**
 - Graph: **vis.js** 기반 지식그래프 시각화
 - AI: `openai` SDK를 사용해 **LM Studio(OpenAI-compatible) 로컬 API** 연동
+- 제출 포털: 부서별 증빙 업로드, 파일 버전 이력, 관리자 보완요청/승인
 
 ---
 
@@ -39,6 +40,17 @@ python app.py
 
 실행 후:
 - http://localhost:5000 접속
+
+### 4. 개발용 로그인 계정
+
+`app.py` 실행 시 내부 MVP용 계정이 자동 시딩됩니다. 운영 전에는 반드시 비밀번호를 변경하거나 SSO로 전환하세요.
+
+| 역할 | 이메일 | 기본 비밀번호 |
+|---|---|---|
+| 관리자 | `admin@local.accreditation` | `admin1234` |
+| 부서 담당자 예시 | `acad@local.accreditation` | `dept1234` |
+
+부서 계정은 부서 마스터 코드 기준으로 생성됩니다. 예: `plan@local.accreditation`, `stud@local.accreditation`, `libr@local.accreditation`.
 
 ---
 
@@ -75,6 +87,7 @@ $env:AI_MODEL="gemma-2-9b-it"
 | 현황 대시보드 | `/` | `templates/dashboard.html` |
 | 상세 검토 뷰 | `/review` | `templates/review.html` |
 | 전체 비교(Full View) | `/fullview` | `templates/fullview.html` |
+| 증빙 제출 관리 | `/submissions` | `templates/submissions.html` |
 | 증빙자료 관리 | `/evidence` | `templates/evidence.html` |
 | 지식그래프 | `/graph` | `templates/graph.html` |
 
@@ -115,6 +128,14 @@ $env:AI_MODEL="gemma-2-9b-it"
 - `DELETE /api/evidence/<ev_id>` : 증빙자료 삭제
 - `GET /api/evidence/summary` : 준거별 요약
 
+### 증빙 제출 포털
+- `GET /api/me` : 현재 로그인 사용자
+- `GET /api/submissions?status=&criterion=&department=` : 제출 과제 목록
+- `GET /api/submissions/<submission_id>/files` : 파일 버전 이력
+- `POST /api/submissions/<submission_id>/upload` : 증빙 파일 업로드
+- `GET /api/files/<file_id>/download` : 권한 확인 후 파일 다운로드
+- `PATCH /api/submissions/<submission_id>/status` : 관리자 보완요청/승인
+
 ### AI (RAG)
 - `POST /api/ai/ask`
   - `query`: 질문
@@ -140,6 +161,8 @@ $env:AI_MODEL="gemma-2-9b-it"
 │   ├── review.html
 │   ├── fullview.html
 │   ├── evidence.html
+│   ├── login.html
+│   ├── submissions.html
 │   └── graph.html
 ├── static/
 │   └── css/
@@ -147,7 +170,9 @@ $env:AI_MODEL="gemma-2-9b-it"
 │       ├── review.css
 │       ├── fullview.css
 │       ├── evidence.css
+│       ├── submissions.css
 │       └── graph.css
+├── uploads/                    # 증빙 제출 파일 저장소(로컬 MVP)
 ├── outputs-20260427T015448Z-3-001/   # (데이터 산출물) 임포트 원본
 ├── scripts-20260427T015447Z-3-001/   # (데이터 생성/가공) 스크립트 번들
 ├── PROJECT_HANDOVER.md         # 프로젝트 인수인계/주의사항/구조 설명(중요)
@@ -167,6 +192,10 @@ $env:AI_MODEL="gemma-2-9b-it"
 - `departments` : 부서 마스터(기본 부서 seed 포함)
 - `change_department` : 변경사항-부서 N:M 연결
 - `evidence_registry` : 증빙자료 등록부
+- `users` : 내부 MVP용 사용자/역할/부서 계정
+- `evidence_submission` : `evidence_checklist` 기반 제출 상태
+- `evidence_file` : 파일 버전, 업로더 이메일 스냅샷, 서버 업로드시간, 해시
+- `evidence_submission_log` : 업로드/상태 변경 이력
 
 ---
 

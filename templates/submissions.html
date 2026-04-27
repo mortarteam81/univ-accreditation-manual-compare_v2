@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>증빙 제출 — 대학기관평가인증</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/submissions.css">
+</head>
+<body>
+<div class="app-container">
+  <header class="app-header animate-in">
+    <div class="header-left">
+      <a href="/" class="back-link" title="대시보드로 돌아가기">← 대시보드</a>
+      <div class="header-icon">✓</div>
+      <div>
+        <h1 class="header-title">증빙 제출 관리</h1>
+        <p class="header-subtitle" id="page-subtitle">부서별 제출 현황과 파일 버전 이력</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="header-badge badge-live" id="user-badge">로그인됨</span>
+      <a href="/logout" class="portal-link danger">로그아웃</a>
+    </div>
+  </header>
+
+  <section class="submission-stats animate-in" id="submission-stats"></section>
+
+  <section class="submission-toolbar animate-in">
+    <div class="portal-field">
+      <label>상태</label>
+      <select id="f-status">
+        <option value="">전체</option>
+        <option value="not_submitted">미제출</option>
+        <option value="submitted">제출됨</option>
+        <option value="revision_requested">보완요청</option>
+        <option value="approved">승인</option>
+      </select>
+    </div>
+    <div class="portal-field">
+      <label>준거</label>
+      <select id="f-criterion"><option value="">전체</option></select>
+    </div>
+    <div class="portal-field admin-only" hidden>
+      <label>부서</label>
+      <select id="f-department"><option value="">전체</option></select>
+    </div>
+    <button class="portal-button primary" onclick="loadSubmissions()">조회</button>
+  </section>
+
+  <section class="submission-content animate-in">
+    <div id="submission-list" class="submission-list">
+      <div class="loading"><div class="spinner"></div>제출 과제 로딩 중...</div>
+    </div>
+  </section>
+</div>
+
+<div class="portal-modal" id="upload-modal" onclick="closeModal(event)">
+  <div class="portal-modal-body" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeUploadModal()">&times;</button>
+    <h3>파일 업로드</h3>
+    <p id="upload-title"></p>
+    <input type="file" id="upload-file">
+    <div class="portal-modal-actions">
+      <button class="portal-button primary" onclick="submitUpload()">업로드</button>
+      <button class="portal-button secondary" onclick="closeUploadModal()">취소</button>
+    </div>
+  </div>
+</div>
+
+<div class="portal-modal" id="files-modal" onclick="closeModal(event)">
+  <div class="portal-modal-body wide" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeFilesModal()">&times;</button>
+    <h3>파일 버전 이력</h3>
+    <div id="files-list" class="files-list"></div>
+  </div>
+</div>
+
+<script>
+const statusLabels = {
+  not_submitted: '미제출',
+  submitted: '제출됨',
+  revision_requested: '보완요청',
+  approved: '승인'
+};
+let me = null;
+let selectedSubmissionId = null;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, options);
+  if (res.status === 401) {
+    location.href = `/login?next=${encodeURIComponent('/submissions')}`;
+    return;
+  }
+  const contentType = res.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await res.json() : await res.text();
+  if (!res.ok) {
+    throw new Error(data.error || data || '요청 처리 중 오류가 발생했습니다');
+  }
+  return data;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function formatDate(value) {
+  if (!value) return '-';
+  return value.replace('T', ' ').slice(0, 16);
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function toast(message, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = message;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 250);
+  }, 2200);
+}
+
+async function init() {
+  me = await api('/api/me');
+  document.getElementById('user-badge').textContent =
+    me.role === 'admin' ? `${me.display_name} · 관리자` : `${me.department} · ${me.display_name}`;
+  if (me.role === 'admin') {
+    document.querySelectorAll('.admin-only').forEach(el => el.hidden = false);
+  }
+
+  const criteria = await api('/api/criteria-list');
+  const criterionSelect = document.getElementById('f-criterion');
+  criteria.forEach(c => criterionSelect.appendChild(new Option(`${c.cycle4_criterion} ${c.cycle4_title}`, c.cycle4_criterion)));
+
+  if (me.role === 'admin') {
+    const departments = await api('/api/departments');
+    const departmentSelect = document.getElementById('f-department');
+    departments.forEach(d => departmentSelect.appendChild(new Option(d.dept_name, d.dept_name)));
+  }
+
+  await loadSubmissions();
+}
+
+async function loadSubmissions() {
+  const q = new URLSearchParams();
+  const status = document.getElementById('f-status').value;
+  const criterion = document.getElementById('f-criterion').value;
+  const department = document.getElementById('f-department')?.value || '';
+  if (status) q.set('status', status);
+  if (criterion) q.set('criterion', criterion);
+  if (department) q.set('department', department);
+
+  const container = document.getElementById('submission-list');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>제출 과제 로딩 중...</div>';
+  const data = await api(`/api/submissions?${q}`);
+  renderStats(data);
+  renderSubmissions(data);
+}
+
+function renderStats(data) {
+  const counts = {not_submitted: 0, submitted: 0, revision_requested: 0, approved: 0};
+  data.forEach(item => counts[item.status] = (counts[item.status] || 0) + 1);
+  document.getElementById('submission-stats').innerHTML = `
+    <div class="submission-stat"><span>전체</span><strong>${data.length}</strong></div>
+    <div class="submission-stat muted"><span>미제출</span><strong>${counts.not_submitted}</strong></div>
+    <div class="submission-stat info"><span>제출됨</span><strong>${counts.submitted}</strong></div>
+    <div class="submission-stat warn"><span>보완요청</span><strong>${counts.revision_requested}</strong></div>
+    <div class="submission-stat ok"><span>승인</span><strong>${counts.approved}</strong></div>
+  `;
+}
+
+function renderSubmissions(data) {
+  const container = document.getElementById('submission-list');
+  if (!data.length) {
+    container.innerHTML = '<div class="portal-empty">조회된 제출 과제가 없습니다.</div>';
+    return;
+  }
+
+  const rows = data.map(item => `
+    <tr>
+      <td>
+        <div class="criterion-cell">${escapeHtml(item.cycle4_criterion)}</div>
+        <div class="muted-text">${escapeHtml(item.cycle4_title)}</div>
+      </td>
+      <td>
+        <div>${escapeHtml(item.primary_department)}</div>
+        <div class="muted-text">${escapeHtml(item.support_departments || '')}</div>
+      </td>
+      <td class="task-cell">${escapeHtml(item.preparation_task)}</td>
+      <td><span class="status-pill status-${item.status}">${statusLabels[item.status] || item.status}</span></td>
+      <td>
+        ${item.latest_version_no ? `<strong>v${item.latest_version_no}</strong> ${escapeHtml(item.latest_filename || '')}` : '<span class="muted-text">-</span>'}
+        ${item.file_count ? `<div class="muted-text">${item.file_count}개 버전</div>` : ''}
+      </td>
+      <td>
+        <div>${escapeHtml(item.latest_uploader_email || '-')}</div>
+        <div class="muted-text">${formatDate(item.latest_uploaded_at)}</div>
+      </td>
+      <td class="action-cell">
+        <button class="icon-button" title="업로드" onclick="openUploadModal(${item.submission_id}, '${escapeHtml(item.cycle4_criterion)}')">업로드</button>
+        <button class="icon-button" title="파일 이력" onclick="openFilesModal(${item.submission_id})">이력</button>
+        ${me.role === 'admin' ? `
+          <button class="icon-button ok" title="승인" onclick="updateStatus(${item.submission_id}, 'approved')">승인</button>
+          <button class="icon-button warn" title="보완요청" onclick="updateStatus(${item.submission_id}, 'revision_requested')">보완</button>
+        ` : ''}
+      </td>
+    </tr>
+  `).join('');
+
+  container.innerHTML = `
+    <table class="submission-table">
+      <thead>
+        <tr>
+          <th>준거</th><th>부서</th><th>제출 과제</th><th>상태</th><th>최신 파일</th><th>업로드</th><th>액션</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+  `;
+}
+
+function openUploadModal(submissionId, criterion) {
+  selectedSubmissionId = submissionId;
+  document.getElementById('upload-title').textContent = `${criterion} · 제출 항목 #${submissionId}`;
+  document.getElementById('upload-file').value = '';
+  document.getElementById('upload-modal').classList.add('open');
+}
+
+function closeUploadModal() {
+  document.getElementById('upload-modal').classList.remove('open');
+  selectedSubmissionId = null;
+}
+
+async function submitUpload() {
+  const input = document.getElementById('upload-file');
+  if (!input.files.length) {
+    toast('파일을 선택하세요', 'error');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', input.files[0]);
+  try {
+    const result = await api(`/api/submissions/${selectedSubmissionId}/upload`, {method: 'POST', body: fd});
+    toast(`v${result.version_no} 업로드 완료`);
+    closeUploadModal();
+    await loadSubmissions();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+async function openFilesModal(submissionId) {
+  const list = document.getElementById('files-list');
+  list.innerHTML = '<div class="loading"><div class="spinner"></div>파일 이력 로딩 중...</div>';
+  document.getElementById('files-modal').classList.add('open');
+  try {
+    const files = await api(`/api/submissions/${submissionId}/files`);
+    if (!files.length) {
+      list.innerHTML = '<div class="portal-empty">업로드된 파일이 없습니다.</div>';
+      return;
+    }
+    list.innerHTML = files.map(f => `
+      <div class="file-version">
+        <div>
+          <strong>v${f.version_no}</strong>
+          <span>${escapeHtml(f.original_filename)}</span>
+          <div class="muted-text">${escapeHtml(f.uploader_email)} · ${formatDate(f.uploaded_at)} · ${formatBytes(f.file_size)}</div>
+          <code>${escapeHtml((f.file_hash || '').slice(0, 16))}</code>
+        </div>
+        <a class="portal-button secondary" href="/api/files/${f.file_id}/download">다운로드</a>
+      </div>
+    `).join('');
+  } catch (err) {
+    list.innerHTML = `<div class="portal-empty error">${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function closeFilesModal() {
+  document.getElementById('files-modal').classList.remove('open');
+}
+
+function closeModal(event) {
+  if (!event || event.target.classList.contains('portal-modal')) {
+    closeUploadModal();
+    closeFilesModal();
+  }
+}
+
+async function updateStatus(submissionId, status) {
+  const label = status === 'approved' ? '승인' : '보완요청';
+  const note = prompt(`${label} 메모를 입력하세요`) || '';
+  try {
+    await api(`/api/submissions/${submissionId}/status`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status, note})
+    });
+    toast(`${label} 처리 완료`);
+    await loadSubmissions();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+init().catch(err => {
+  document.getElementById('submission-list').innerHTML = `<div class="portal-empty error">${escapeHtml(err.message)}</div>`;
+});
+</script>
+</body>
+</html>

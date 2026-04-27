@@ -4,21 +4,36 @@
 SQLite DB에서 데이터를 읽어 JSON API로 제공합니다.
 """
 
-import sqlite3
+import hashlib
 import json
+import os
 import sys
+import sqlite3
+import uuid
+from functools import wraps
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_file
 
 from ai_service import ask_ai
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.security import check_password_hash, generate_password_hash
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-only-change-me")
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 
 DB_PATH = Path(__file__).parent / "accreditation_review.db"
+APP_DIR = Path(__file__).parent
+UPLOAD_DIR = APP_DIR / "uploads"
+ALLOWED_UPLOAD_EXTENSIONS = {
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+    "hwp", "hwpx", "zip", "png", "jpg", "jpeg",
+}
+SUBMISSION_STATUSES = {"not_submitted", "submitted", "revision_requested", "approved"}
 
 
 # ─── DB 헬퍼 ───────────────────────────────────────────
@@ -41,6 +56,101 @@ def query_one(sql, params=()):
     row = conn.execute(sql, params).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def now_iso():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def current_user():
+    user_id = session.get("user_id")
+    if not user_id:
+        return None
+    return query_one(
+        "SELECT user_id, email, display_name, role, department FROM users WHERE user_id=? AND is_active=1",
+        (user_id,),
+    )
+
+
+def wants_json_response():
+    return request.path.startswith("/api/") or "application/json" in request.headers.get("Accept", "")
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not current_user():
+            if wants_json_response():
+                return jsonify({"error": "login required"}), 401
+            return redirect(url_for("login_page", next=request.path))
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        user = current_user()
+        if not user:
+            return jsonify({"error": "login required"}), 401
+        if user["role"] != "admin":
+            return jsonify({"error": "admin required"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def support_departments_match(support_departments, department):
+    if not support_departments or not department:
+        return False
+    parts = [p.strip() for p in support_departments.split(";") if p.strip()]
+    return department in parts
+
+
+def user_can_access_submission(user, submission_row):
+    if not user or not submission_row:
+        return False
+    if user["role"] == "admin":
+        return True
+    department = user.get("department")
+    return (
+        department
+        and (
+            submission_row.get("primary_department") == department
+            or support_departments_match(submission_row.get("support_departments"), department)
+        )
+    )
+
+
+def get_submission_for_user(conn, submission_id, user):
+    row = conn.execute("""
+        SELECT
+            es.*,
+            ec.checklist_id, ec.change_id, ec.cycle4_criterion, ec.cycle4_title,
+            ec.section_type, ec.field_or_focus, ec.primary_department,
+            ec.support_departments, ec.data_period, ec.metric_or_threshold,
+            ec.evidence_link, ec.official_confirmation_needed, ec.preparation_task
+        FROM evidence_submission es
+        JOIN evidence_checklist ec ON ec.checklist_id = es.checklist_id
+        WHERE es.submission_id = ?
+    """, (submission_id,)).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    return data if user_can_access_submission(user, data) else None
+
+
+def allowed_upload(filename):
+    if "." not in filename:
+        return False
+    return filename.rsplit(".", 1)[1].lower() in ALLOWED_UPLOAD_EXTENSIONS
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ─── DB 초기화: 추가 테이블 ────────────────────────────
@@ -108,6 +218,80 @@ def init_extra_tables():
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ev_criterion ON evidence_registry(criterion)")
 
+    # 내부 MVP용 사용자 계정
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'department')),
+            department TEXT,
+            is_active INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_department ON users(department)")
+
+    # 체크리스트 항목별 제출 상태
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_submission (
+            submission_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checklist_id TEXT NOT NULL UNIQUE,
+            assigned_department TEXT,
+            status TEXT NOT NULL DEFAULT 'not_submitted',
+            last_file_id INTEGER,
+            submitted_by_user_id INTEGER,
+            submitted_at TEXT,
+            reviewed_by_user_id INTEGER,
+            reviewer_email TEXT,
+            review_note TEXT,
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_es_checklist ON evidence_submission(checklist_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_es_status ON evidence_submission(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_es_department ON evidence_submission(assigned_department)")
+
+    # 업로드 파일 버전 이력
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_file (
+            file_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            submission_id INTEGER NOT NULL,
+            version_no INTEGER NOT NULL,
+            original_filename TEXT NOT NULL,
+            stored_filename TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            file_hash TEXT NOT NULL,
+            uploaded_by_user_id INTEGER NOT NULL,
+            uploader_email TEXT NOT NULL,
+            uploaded_at TEXT NOT NULL,
+            UNIQUE(submission_id, version_no)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ef_submission ON evidence_file(submission_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ef_hash ON evidence_file(file_hash)")
+
+    # 제출 상태와 업로드 이벤트 로그
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS evidence_submission_log (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            submission_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            note TEXT,
+            actor_user_id INTEGER,
+            actor_email TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_eslog_submission ON evidence_submission_log(submission_id)")
+
     # 기존 부서 시딩 (중복 무시)
     seed_depts = [
         ('기획처', 'PLAN', '행정', 1),
@@ -134,13 +318,98 @@ def init_extra_tables():
             VALUES (?, ?, ?, ?, ?)
         """, (name, code, cat, order, now))
 
+    # 개발용 로그인 계정. 운영 전 반드시 비밀번호 교체/SSO 전환 필요.
+    conn.execute("""
+        INSERT OR IGNORE INTO users (email, password_hash, display_name, role, department, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        "admin@local.accreditation",
+        generate_password_hash(os.environ.get("ADMIN_SEED_PASSWORD", "admin1234")),
+        "평가인증 총괄자",
+        "admin",
+        None,
+        now,
+    ))
+    for name, code, _cat, _order in seed_depts:
+        conn.execute("""
+            INSERT OR IGNORE INTO users (email, password_hash, display_name, role, department, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            f"{code.lower()}@local.accreditation",
+            generate_password_hash(os.environ.get("DEPT_SEED_PASSWORD", "dept1234")),
+            f"{name} 담당자",
+            "department",
+            name,
+            now,
+        ))
+
+    # evidence_checklist를 제출 과제로 투영하되 원천 테이블은 수정하지 않는다.
+    checklist_exists = conn.execute("""
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type='table' AND name='evidence_checklist'
+    """).fetchone()[0]
+    if checklist_exists:
+        conn.execute("""
+            INSERT OR IGNORE INTO evidence_submission (
+                checklist_id, assigned_department, status, created_at, updated_at
+            )
+            SELECT checklist_id, primary_department, 'not_submitted', ?, ?
+            FROM evidence_checklist
+        """, (now, now))
+
     conn.commit()
     conn.close()
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 init_extra_tables()
 
 
 # ─── 페이지 라우트 ──────────────────────────────────────
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(_error):
+    return jsonify({"error": "파일은 50MB 이하만 업로드할 수 있습니다"}), 413
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    if request.method in {"GET", "HEAD"}:
+        if current_user():
+            return redirect(url_for("submissions_page"))
+        return render_template("login.html")
+
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    next_url = request.args.get("next") or url_for("submissions_page")
+
+    user = query_one("""
+        SELECT user_id, email, password_hash, display_name, role, department, is_active
+        FROM users
+        WHERE email = ?
+    """, (email,))
+
+    if not user or not user["is_active"] or not check_password_hash(user["password_hash"], password):
+        return render_template("login.html", error="이메일 또는 비밀번호를 확인하세요", email=email), 401
+
+    session.clear()
+    session["user_id"] = user["user_id"]
+    session["email"] = user["email"]
+    session["role"] = user["role"]
+    return redirect(next_url)
+
+
+@app.route("/logout")
+def logout_page():
+    session.clear()
+    return redirect(url_for("login_page"))
+
+
+@app.route("/submissions")
+@login_required
+def submissions_page():
+    return render_template("submissions.html", user=current_user())
+
 
 @app.route("/")
 def dashboard():
@@ -169,8 +438,15 @@ def api_fullview():
             ca.similarity, ca.source_text_3, ca.source_text_4,
             ca.source_id_3, ca.source_id_4, ca.verification_status,
             ca.human_review_status, ca.global_match_status, ca.global_candidate_count,
-            ca.item_path_4, ca.field_name_4, ca.review_reason
+            ca.item_path_4, ca.field_name_4, ca.review_reason,
+            COALESCE(notes.note_count, 0) AS note_count
         FROM change_atom ca
+        LEFT JOIN (
+            SELECT change_id, COUNT(*) AS note_count
+            FROM review_log
+            WHERE TRIM(COALESCE(note, '')) <> ''
+            GROUP BY change_id
+        ) notes ON notes.change_id = ca.change_id
         WHERE ca.section_type = ?
         ORDER BY ca.cycle4_criterion, ca.change_id
     """, (section,))
@@ -180,7 +456,8 @@ def api_fullview():
     for r in rows:
         key = r["cycle4_criterion"]
         if key not in grouped:
-            grouped[key] = {"criterion": key, "title": r["cycle4_title"], "items": []}
+            grouped[key] = {"criterion": key, "title": r["cycle4_title"], "note_count": 0, "items": []}
+        grouped[key]["note_count"] += r["note_count"]
         grouped[key]["items"].append(r)
 
     return jsonify(list(grouped.values()))
@@ -240,10 +517,319 @@ def api_overview():
     return jsonify(stats)
 
 
+# ─── 제출 포털 API ──────────────────────────────────────
+
+@app.route("/api/me")
+@login_required
+def api_me():
+    return jsonify(current_user())
+
+
+@app.route("/api/submissions")
+@login_required
+def api_submissions():
+    """증빙 제출 과제 목록"""
+    user = current_user()
+    status = request.args.get("status", "")
+    criterion = request.args.get("criterion", "")
+    department = request.args.get("department", "")
+
+    sql = """
+        SELECT
+            es.submission_id, es.status, es.assigned_department,
+            es.submitted_at, es.review_note, es.reviewed_at, es.reviewer_email,
+            ec.checklist_id, ec.change_id, ec.cycle4_criterion, ec.cycle4_title,
+            ec.section_type, ec.field_or_focus, ec.primary_department,
+            ec.support_departments, ec.data_period, ec.metric_or_threshold,
+            ec.evidence_link, ec.official_confirmation_needed, ec.preparation_task,
+            (
+                SELECT COUNT(*)
+                FROM evidence_file ef
+                WHERE ef.submission_id = es.submission_id
+            ) AS file_count,
+            (
+                SELECT ef.version_no
+                FROM evidence_file ef
+                WHERE ef.submission_id = es.submission_id
+                ORDER BY ef.version_no DESC
+                LIMIT 1
+            ) AS latest_version_no,
+            (
+                SELECT ef.original_filename
+                FROM evidence_file ef
+                WHERE ef.submission_id = es.submission_id
+                ORDER BY ef.version_no DESC
+                LIMIT 1
+            ) AS latest_filename,
+            (
+                SELECT ef.uploader_email
+                FROM evidence_file ef
+                WHERE ef.submission_id = es.submission_id
+                ORDER BY ef.version_no DESC
+                LIMIT 1
+            ) AS latest_uploader_email,
+            (
+                SELECT ef.uploaded_at
+                FROM evidence_file ef
+                WHERE ef.submission_id = es.submission_id
+                ORDER BY ef.version_no DESC
+                LIMIT 1
+            ) AS latest_uploaded_at
+        FROM evidence_submission es
+        JOIN evidence_checklist ec ON ec.checklist_id = es.checklist_id
+        WHERE 1=1
+    """
+    params = []
+
+    if user["role"] == "department":
+        sql += """
+            AND (
+                ec.primary_department = ?
+                OR (';' || COALESCE(ec.support_departments, '') || ';') LIKE ?
+            )
+        """
+        params.extend([user["department"], f"%;{user['department']};%"])
+    elif department:
+        sql += " AND ec.primary_department = ?"
+        params.append(department)
+
+    if status:
+        sql += " AND es.status = ?"
+        params.append(status)
+    if criterion:
+        sql += " AND ec.cycle4_criterion = ?"
+        params.append(criterion)
+
+    sql += " ORDER BY ec.cycle4_criterion, ec.primary_department, ec.checklist_id"
+    return jsonify(query_all(sql, params))
+
+
+@app.route("/api/submissions/<int:submission_id>/files")
+@login_required
+def api_submission_files(submission_id):
+    user = current_user()
+    conn = get_db()
+    submission = get_submission_for_user(conn, submission_id, user)
+    if not submission:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    rows = conn.execute("""
+        SELECT file_id, submission_id, version_no, original_filename, stored_filename,
+               file_size, file_hash, uploaded_by_user_id, uploader_email, uploaded_at
+        FROM evidence_file
+        WHERE submission_id = ?
+        ORDER BY version_no DESC
+    """, (submission_id,)).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/submissions/<int:submission_id>/upload", methods=["POST"])
+@login_required
+def api_upload_submission_file(submission_id):
+    user = current_user()
+    conn = get_db()
+    submission = get_submission_for_user(conn, submission_id, user)
+    if not submission:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        conn.close()
+        return jsonify({"error": "file required"}), 400
+
+    raw_filename = uploaded.filename.replace("\\", "/").split("/")[-1]
+    if not allowed_upload(raw_filename):
+        conn.close()
+        return jsonify({"error": "허용되지 않는 파일 형식입니다"}), 400
+
+    ext = raw_filename.rsplit(".", 1)[1].lower()
+    display_filename = raw_filename or f"upload.{ext}"
+    next_version = conn.execute("""
+        SELECT COALESCE(MAX(version_no), 0) + 1
+        FROM evidence_file
+        WHERE submission_id = ?
+    """, (submission_id,)).fetchone()[0]
+
+    stored_filename = f"v{next_version}_{uuid.uuid4().hex}.{ext}"
+    upload_dir = UPLOAD_DIR / str(submission_id)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    saved_path = upload_dir / stored_filename
+    uploaded.save(saved_path)
+
+    file_size = saved_path.stat().st_size
+    if file_size <= 0:
+        saved_path.unlink(missing_ok=True)
+        conn.close()
+        return jsonify({"error": "empty file"}), 400
+
+    file_hash = file_sha256(saved_path)
+    relative_path = saved_path.relative_to(APP_DIR).as_posix()
+    uploaded_at = now_iso()
+
+    try:
+        cur = conn.execute("""
+            INSERT INTO evidence_file (
+                submission_id, version_no, original_filename, stored_filename,
+                file_path, file_size, file_hash, uploaded_by_user_id,
+                uploader_email, uploaded_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            submission_id, next_version, display_filename, stored_filename,
+            relative_path, file_size, file_hash, user["user_id"],
+            user["email"], uploaded_at,
+        ))
+        file_id = cur.lastrowid
+        old_status = submission["status"]
+        conn.execute("""
+            UPDATE evidence_submission
+            SET status='submitted',
+                last_file_id=?,
+                submitted_by_user_id=?,
+                submitted_at=?,
+                updated_at=?
+            WHERE submission_id=?
+        """, (file_id, user["user_id"], uploaded_at, uploaded_at, submission_id))
+        conn.execute("""
+            INSERT INTO evidence_submission_log (
+                submission_id, action, old_status, new_status, note,
+                actor_user_id, actor_email, created_at
+            )
+            VALUES (?, 'upload', ?, 'submitted', ?, ?, ?, ?)
+        """, (
+            submission_id, old_status, f"v{next_version}: {display_filename}",
+            user["user_id"], user["email"], uploaded_at,
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        saved_path.unlink(missing_ok=True)
+        conn.close()
+        raise
+
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "file_id": file_id,
+        "submission_id": submission_id,
+        "version_no": next_version,
+        "uploader_email": user["email"],
+        "uploaded_at": uploaded_at,
+        "file_hash": file_hash,
+    })
+
+
+@app.route("/api/submissions/<int:submission_id>/status", methods=["PATCH"])
+@admin_required
+def api_update_submission_status(submission_id):
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    new_status = data.get("status", "")
+    note = (data.get("note") or "").strip()
+    if new_status not in SUBMISSION_STATUSES - {"not_submitted", "submitted"}:
+        return jsonify({"error": "status must be revision_requested or approved"}), 400
+
+    conn = get_db()
+    submission = get_submission_for_user(conn, submission_id, user)
+    if not submission:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    file_count = conn.execute(
+        "SELECT COUNT(*) FROM evidence_file WHERE submission_id=?",
+        (submission_id,),
+    ).fetchone()[0]
+    if new_status == "approved" and file_count == 0:
+        conn.close()
+        return jsonify({"error": "업로드된 파일이 없는 제출 항목은 승인할 수 없습니다"}), 400
+
+    old_status = submission["status"]
+    reviewed_at = now_iso()
+    conn.execute("""
+        UPDATE evidence_submission
+        SET status=?,
+            reviewed_by_user_id=?,
+            reviewer_email=?,
+            review_note=?,
+            reviewed_at=?,
+            updated_at=?
+        WHERE submission_id=?
+    """, (
+        new_status, user["user_id"], user["email"], note,
+        reviewed_at, reviewed_at, submission_id,
+    ))
+    conn.execute("""
+        INSERT INTO evidence_submission_log (
+            submission_id, action, old_status, new_status, note,
+            actor_user_id, actor_email, created_at
+        )
+        VALUES (?, 'status_change', ?, ?, ?, ?, ?, ?)
+    """, (
+        submission_id, old_status, new_status, note,
+        user["user_id"], user["email"], reviewed_at,
+    ))
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "submission_id": submission_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "reviewer_email": user["email"],
+        "reviewed_at": reviewed_at,
+    })
+
+
+@app.route("/api/files/<int:file_id>/download")
+@login_required
+def api_download_file(file_id):
+    user = current_user()
+    conn = get_db()
+    row = conn.execute("""
+        SELECT ef.*, es.submission_id
+        FROM evidence_file ef
+        JOIN evidence_submission es ON es.submission_id = ef.submission_id
+        WHERE ef.file_id = ?
+    """, (file_id,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"error": "not found"}), 404
+
+    submission = get_submission_for_user(conn, row["submission_id"], user)
+    conn.close()
+    if not submission:
+        return jsonify({"error": "not found"}), 404
+
+    path = APP_DIR / row["file_path"]
+    if not path.exists() or not path.is_file():
+        return jsonify({"error": "file missing"}), 404
+    return send_file(path, as_attachment=True, download_name=row["original_filename"])
+
+
 @app.route("/api/criteria-progress")
 def api_criteria_progress():
     """준거별 검토 진행률"""
-    rows = query_all("SELECT * FROM v_criterion_review_progress")
+    rows = query_all("""
+        SELECT
+            progress.*,
+            COALESCE(notes.note_count, 0) AS note_count,
+            COALESCE(notes.note_item_count, 0) AS note_item_count
+        FROM v_criterion_review_progress progress
+        LEFT JOIN (
+            SELECT
+                ca.cycle4_criterion,
+                COUNT(*) AS note_count,
+                COUNT(DISTINCT ca.change_id) AS note_item_count
+            FROM change_atom ca
+            JOIN review_log rl ON rl.change_id = ca.change_id
+            WHERE TRIM(COALESCE(rl.note, '')) <> ''
+            GROUP BY ca.cycle4_criterion
+        ) notes ON notes.cycle4_criterion = progress.cycle4_criterion
+        ORDER BY progress.cycle4_criterion
+    """)
     return jsonify(rows)
 
 
@@ -287,20 +873,32 @@ def api_changes():
     change_type = request.args.get("change_type", "")
     status = request.args.get("status", "")
 
-    sql = "SELECT * FROM v_change_detail WHERE 1=1"
+    sql = """
+        SELECT
+            detail.*,
+            COALESCE(notes.note_count, 0) AS note_count
+        FROM v_change_detail detail
+        LEFT JOIN (
+            SELECT change_id, COUNT(*) AS note_count
+            FROM review_log
+            WHERE TRIM(COALESCE(note, '')) <> ''
+            GROUP BY change_id
+        ) notes ON notes.change_id = detail.change_id
+        WHERE 1=1
+    """
     params = []
 
     if criterion:
-        sql += " AND cycle4_criterion = ?"
+        sql += " AND detail.cycle4_criterion = ?"
         params.append(criterion)
     if section:
-        sql += " AND section_type = ?"
+        sql += " AND detail.section_type = ?"
         params.append(section)
     if change_type:
-        sql += " AND change_type = ?"
+        sql += " AND detail.change_type = ?"
         params.append(change_type)
     if status:
-        sql += " AND verification_status = ?"
+        sql += " AND detail.verification_status = ?"
         params.append(status)
 
     rows = query_all(sql, params)

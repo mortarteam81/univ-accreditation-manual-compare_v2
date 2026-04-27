@@ -20,6 +20,7 @@
 | **현황 대시보드** | `/` | `dashboard.html` | 전체 진행률, 요약 통계 제공 |
 | **전체 비교 뷰** | `/fullview` | `fullview.html` | 밀도 높은 테이블 구조로 3/4주기 항목을 전체 스캔하고 즉각 확정/반려 처리 |
 | **상세 검토 뷰** | `/review` | `review.html` | 단일 준거에 대한 상세 변경사항 모달 제공 및 **담당 부서 복수 매칭** 기능 |
+| **증빙 제출 관리** | `/submissions` | `submissions.html` | 부서 담당자 증빙 업로드, 파일 버전 이력, 관리자 보완요청/승인 |
 | **증빙자료 관리** | `/evidence` | `evidence.html` | 3주기 자료 목록화 및 4주기 재활용 여부 CRUD 처리 (준거별 그룹핑) |
 | **지식그래프 & AI** | `/graph` | `graph.html` | `vis.js`를 이용한 편람 간 연관성 시각화 및 AI(RAG) 기반 실무 가이드/요약 채팅 |
 
@@ -31,6 +32,15 @@
 1. **`departments`**: 기준이 되는 대학 행정부서 마스터 테이블 (기획처, 교무처 등 16개 사전 셋업).
 2. **`change_department`**: 준거별 변경사항(`change_id`)과 부서(`dept_id`)를 이어주는 다대다(N:M) 연결 테이블.
 3. **`evidence_registry`**: 과거 증빙자료 관리 (자료 제목, 위치, 관리번호, 재활용 여부, 매칭된 준거 등).
+4. **`users`**: 내부 MVP용 로그인 계정. 역할은 `admin`, `department`만 사용.
+5. **`evidence_submission`**: `evidence_checklist` 항목별 제출 상태. 상태는 `not_submitted`, `submitted`, `revision_requested`, `approved`.
+6. **`evidence_file`**: 제출 파일 버전 이력. `version_no`, 업로더 사용자 ID, 업로더 이메일 스냅샷, 서버 업로드시간, SHA-256 해시를 저장.
+7. **`evidence_submission_log`**: 업로드 및 관리자 상태 변경 감사 로그.
+
+### 개발용 계정
+- 관리자: `admin@local.accreditation` / `admin1234`
+- 부서 담당자 예시: `acad@local.accreditation` / `dept1234`
+- 부서 계정은 부서 코드 기준으로 자동 시딩됩니다. 운영 전 비밀번호 변경 또는 SSO 전환이 필요합니다.
 
 ---
 

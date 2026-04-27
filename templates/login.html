@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>로그인 — 증빙 제출 포털</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/submissions.css">
+</head>
+<body>
+<div class="login-shell">
+  <section class="login-panel animate-in">
+    <div class="login-mark">✓</div>
+    <h1>증빙 제출 포털</h1>
+    <p>대학기관평가인증 자료 제출·검토</p>
+    {% if error %}
+      <div class="login-error">{{ error }}</div>
+    {% endif %}
+    <form method="post" class="login-form">
+      <label>
+        <span>이메일</span>
+        <input name="email" type="email" autocomplete="username" value="{{ email or '' }}" required>
+      </label>
+      <label>
+        <span>비밀번호</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button type="submit" class="login-button">로그인</button>
+    </form>
+  </section>
+</div>
+</body>
+</html>
