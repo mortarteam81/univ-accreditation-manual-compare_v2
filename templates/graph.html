@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>지식그래프 & AI 어시스턴트 — 인증평가 편람</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/graph.css">
+</head>
+<body>
+<div class="app-container graph-layout">
+
+  <!-- LEFT: GRAPH -->
+  <div class="graph-panel">
+    <header class="app-header animate-in" style="padding: 16px; margin-bottom: 0;">
+      <div class="header-left">
+        <a href="/" class="back-link">← 대시보드</a>
+        <div class="header-icon">🕸️</div>
+        <div>
+          <h1 class="header-title">지식그래프 탐색</h1>
+          <p class="header-subtitle">편람 내 구조와 관계를 시각적으로 분석</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="legend">
+          <span class="lgd-item"><span class="dot" style="background:#6366f1"></span>준거</span>
+          <span class="lgd-item"><span class="dot" style="background:#10b981"></span>섹션</span>
+          <span class="lgd-item"><span class="dot" style="background:#f59e0b"></span>변경사항</span>
+          <span class="lgd-item"><span class="dot" style="background:#8b5cf6"></span>부서</span>
+        </div>
+      </div>
+    </header>
+    
+    <div id="graph-container" class="graph-container animate-in"></div>
+  </div>
+
+  <!-- RIGHT: AI ASSISTANT -->
+  <div class="ai-panel animate-in">
+    <div class="ai-header">
+      <div class="ai-title">✨ AI 어시스턴트</div>
+      <div class="ai-model">로컬 LLM (Gemma)</div>
+    </div>
+    
+    <!-- RAG Context Selector -->
+    <div class="ai-context-selector">
+      <select id="ai-criterion">
+        <option value="">[선택 안함] 전체 편람 대상 질문</option>
+      </select>
+    </div>
+
+    <!-- Quick Action Buttons -->
+    <div class="ai-quick-actions">
+      <button onclick="quickAsk('summary')">📝 주요 변경 요약</button>
+      <button onclick="quickAsk('evidence')">📎 증빙자료 추천</button>
+      <button onclick="quickAsk('strategy')">🛡️ 취약점 대비 전략</button>
+      <button onclick="quickAsk('guide')">🏢 부서 업무 가이드</button>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="chat-area" id="chat-area">
+      <div class="chat-msg ai-msg">
+        안녕하세요! 4주기 대학기관평가인증 편람 AI 어시스턴트입니다.<br>
+        궁금한 점을 자유롭게 질문하시거나, 상단의 버튼을 눌러 빠른 분석을 받아보세요.
+      </div>
+    </div>
+
+    <!-- Input Area -->
+    <div class="chat-input-area">
+      <textarea id="chat-input" placeholder="AI에게 편람 해석이나 가이드를 질문하세요..." rows="2"></textarea>
+      <button class="btn-send" onclick="sendChat()">전송</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = path => fetch(path).then(r => r.json());
+let network = null;
+
+async function init() {
+  // Load Graph
+  const data = await API('/api/graph/data');
+  const container = document.getElementById('graph-container');
+  
+  const options = {
+    layout: { improvedLayout: false },
+    nodes: {
+      shape: 'dot',
+      size: 16,
+      font: { color: '#e5e7eb', size: 12, face: 'Inter' },
+      borderWidth: 2,
+      shadow: true
+    },
+    edges: {
+      width: 1,
+      color: { color: 'rgba(255,255,255,0.1)', highlight: '#6366f1' },
+      smooth: { type: 'continuous' }
+    },
+    physics: {
+      barnesHut: { gravitationalConstant: -2000, centralGravity: 0.3, springLength: 95 },
+      stabilization: { iterations: 150, updateInterval: 50 },
+      maxVelocity: 50,
+      minVelocity: 0.1
+    },
+    interaction: { hover: true, tooltipDelay: 200 }
+  };
+  
+  network = new vis.Network(container, data, options);
+
+  // Load Criteria for AI Selector
+  const criteriaList = await API('/api/criteria-list');
+  const sel = document.getElementById('ai-criterion');
+  criteriaList.forEach(c => {
+    sel.appendChild(new Option(`${c.cycle4_criterion} ${c.cycle4_title}`, c.cycle4_criterion));
+  });
+
+  // Chat Input Event
+  document.getElementById('chat-input').addEventListener('keypress', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+  });
+}
+
+function appendMsg(role, text) {
+  const area = document.getElementById('chat-area');
+  const d = document.createElement('div');
+  d.className = `chat-msg ${role === 'user' ? 'user-msg' : 'ai-msg'}`;
+  
+  // 간단한 마크다운 처리 (볼드, 줄바꿈, 리스트)
+  let html = text.replace(/\n/g, '<br>');
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\* (.*?)(<br>|$)/g, '<li>$1</li>');
+  
+  d.innerHTML = html;
+  area.appendChild(d);
+  area.scrollTop = area.scrollHeight;
+}
+
+function appendLoading() {
+  const area = document.getElementById('chat-area');
+  const d = document.createElement('div');
+  d.className = `chat-msg ai-msg loading-msg`;
+  d.id = 'chat-loading';
+  d.innerHTML = '<span class="dots"></span> 답변 생성 중...';
+  area.appendChild(d);
+  area.scrollTop = area.scrollHeight;
+}
+
+function removeLoading() {
+  const l = document.getElementById('chat-loading');
+  if (l) l.remove();
+}
+
+async function quickAsk(type) {
+  const crit = document.getElementById('ai-criterion').value;
+  if (!crit) {
+    alert("상단 드롭다운에서 분석할 특정 '준거'를 먼저 선택해주세요.");
+    return;
+  }
+  
+  const typeNames = {
+    summary: "요약", evidence: "증빙 추천", strategy: "대비 전략", guide: "업무 가이드"
+  };
+  
+  appendMsg('user', `[${crit}] 준거에 대한 ${typeNames[type]}을 요청합니다.`);
+  await requestAI("", crit, type);
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  
+  const crit = document.getElementById('ai-criterion').value;
+  
+  input.value = '';
+  appendMsg('user', text);
+  await requestAI(text, crit, "general");
+}
+
+async function requestAI(query, criterion, contextType) {
+  appendLoading();
+  try {
+    const res = await fetch('/api/ai/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, criterion, context_type: contextType })
+    });
+    const d = await res.json();
+    removeLoading();
+    
+    if (d.error) {
+      appendMsg('ai', `⚠️ 오류: ${d.error}`);
+    } else {
+      let ans = d.answer;
+      if (d.context_used) ans += '<br><br><span class="ctx-badge">준거 데이터 활용됨</span>';
+      appendMsg('ai', ans);
+    }
+  } catch (err) {
+    removeLoading();
+    appendMsg('ai', `⚠️ 네트워크 오류: ${err.message}`);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

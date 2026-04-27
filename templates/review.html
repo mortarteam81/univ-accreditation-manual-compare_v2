@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>검토 인터페이스 — 인증평가 편람 비교분석</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/review.css">
+</head>
+<body>
+<div class="app-container">
+
+  <!-- HEADER -->
+  <header class="app-header animate-in">
+    <div class="header-left">
+      <a href="/" class="back-link" title="대시보드로 돌아가기">← 대시보드</a>
+      <div class="header-icon">✏️</div>
+      <div>
+        <h1 class="header-title">항목별 비교 검토</h1>
+        <p class="header-subtitle" id="page-subtitle">준거를 선택하세요</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="header-badge badge-live" id="review-count">0건</span>
+    </div>
+  </header>
+
+  <!-- FILTER BAR -->
+  <div class="filter-bar animate-in" id="filter-bar">
+    <div class="filter-group">
+      <label>준거</label>
+      <select id="f-criterion"><option value="">전체</option></select>
+    </div>
+    <div class="filter-group">
+      <label>섹션</label>
+      <select id="f-section">
+        <option value="">전체</option>
+        <option value="overview">개요</option>
+        <option value="report">보고서</option>
+        <option value="evidence">근거자료</option>
+        <option value="checkpoints">점검사항</option>
+        <option value="notes">유의사항</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>변경유형</label>
+      <select id="f-type">
+        <option value="">전체</option>
+        <option value="유지">유지</option>
+        <option value="변경">변경</option>
+        <option value="신설후보">신설후보</option>
+        <option value="삭제후보">삭제후보</option>
+        <option value="삭제/이동후보">삭제/이동후보</option>
+        <option value="이동후보">이동후보</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>검증상태</label>
+      <select id="f-status">
+        <option value="">전체</option>
+        <option value="confirmed">확정</option>
+        <option value="needs_review">검토필요</option>
+        <option value="candidate">후보</option>
+        <option value="rejected">반려</option>
+      </select>
+    </div>
+    <button class="btn-filter" onclick="loadChanges()">🔍 조회</button>
+  </div>
+
+  <!-- CHANGE LIST -->
+  <div id="change-list" class="change-list">
+    <div class="loading"><div class="spinner"></div>준거를 선택한 후 조회 버튼을 누르세요</div>
+  </div>
+
+</div>
+
+<!-- DETAIL MODAL -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal-content" id="modal-content" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <div id="modal-body">
+      <div class="loading"><div class="spinner"></div>로딩 중...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = path => fetch(path).then(r => r.json());
+
+// ── Init: load criteria list ──
+async function init() {
+  const params = new URLSearchParams(location.search);
+  const crit = params.get('criterion') || '';
+
+  const list = await API('/api/criteria-list');
+  const sel = document.getElementById('f-criterion');
+  list.forEach(c => {
+    const o = document.createElement('option');
+    o.value = c.cycle4_criterion;
+    o.textContent = `${c.cycle4_criterion} ${c.cycle4_title}`;
+    if (c.cycle4_criterion === crit) o.selected = true;
+    sel.appendChild(o);
+  });
+  if (crit) loadChanges();
+}
+
+// ── Load changes ──
+async function loadChanges() {
+  const c = document.getElementById('f-criterion').value;
+  const s = document.getElementById('f-section').value;
+  const t = document.getElementById('f-type').value;
+  const st = document.getElementById('f-status').value;
+
+  const q = new URLSearchParams();
+  if (c) q.set('criterion', c);
+  if (s) q.set('section', s);
+  if (t) q.set('change_type', t);
+  if (st) q.set('status', st);
+
+  const container = document.getElementById('change-list');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>로딩 중...</div>';
+
+  const data = await API(`/api/changes?${q}`);
+  document.getElementById('review-count').textContent = `${data.length}건`;
+
+  const selOpt = document.getElementById('f-criterion');
+  const label = selOpt.options[selOpt.selectedIndex]?.textContent || '전체';
+  document.getElementById('page-subtitle').textContent = `${label} — ${data.length}건`;
+
+  if (!data.length) {
+    container.innerHTML = '<div class="empty-state">조건에 맞는 변경사항이 없습니다.</div>';
+    return;
+  }
+
+  container.innerHTML = data.map((d, i) => renderRow(d, i)).join('');
+}
+
+function changeTypeCls(t) {
+  const m = {'유지':'maintained','변경':'changed','신설후보':'new','삭제후보':'deleted','삭제/이동후보':'deleted','이동후보':'moved'};
+  return m[t] || 'changed';
+}
+
+function statusBadge(s) {
+  const m = {confirmed:['확정','badge-confirmed'], needs_review:['검토필요','badge-needs-review'],
+    candidate:['후보','badge-candidate'], rejected:['반려','badge-rejected'], deferred:['보류','badge-deferred']};
+  const [l, c] = m[s] || [s, 'badge-candidate'];
+  return `<span class="status-badge ${c}">${l}</span>`;
+}
+
+function simColor(v) {
+  if (!v && v !== 0) return '';
+  const n = parseFloat(v);
+  if (n >= 0.8) return 'sim-high';
+  if (n >= 0.5) return 'sim-mid';
+  return 'sim-low';
+}
+
+function truncate(s, n=80) {
+  if (!s) return '<span class="text-empty">—</span>';
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function renderRow(d, i) {
+  const sim = d.similarity ? `${(d.similarity * 100).toFixed(0)}%` : '—';
+  return `
+  <div class="change-row animate-in" style="animation-delay:${i*0.02}s" onclick="openDetail('${d.change_id}')">
+    <div class="row-left">
+      <span class="change-id">${d.change_id}</span>
+      <span class="change-type-tag tag-${changeTypeCls(d.change_type)}">${d.change_type}</span>
+      <span class="section-tag">${d.section_type}</span>
+      ${statusBadge(d.verification_status)}
+    </div>
+    <div class="row-texts">
+      <div class="row-text-3" title="${(d.source_text_3||'').replace(/"/g,'&quot;')}">${truncate(d.source_text_3, 90)}</div>
+      <span class="row-arrow ${simColor(d.similarity)}">${sim}</span>
+      <div class="row-text-4" title="${(d.source_text_4||'').replace(/"/g,'&quot;')}">${truncate(d.source_text_4, 90)}</div>
+    </div>
+  </div>`;
+}
+
+// ── Detail Modal ──
+async function openDetail(changeId) {
+  document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('modal-body').innerHTML = '<div class="loading"><div class="spinner"></div>로딩 중...</div>';
+
+  const [detail, history, allDepts, assignedDepts] = await Promise.all([
+    API(`/api/change/${changeId}`),
+    API(`/api/change/${changeId}/history`),
+    API('/api/departments'),
+    API(`/api/change/${changeId}/departments`)
+  ]);
+
+  const c = detail.change;
+  const mc = detail.match_candidates || [];
+  const acts = detail.department_actions || [];
+  const sim = c.similarity ? `${(c.similarity*100).toFixed(0)}%` : '—';
+
+  let matchHtml = '';
+  if (mc.length) {
+    matchHtml = `<div class="detail-section"><h4>🔍 AI 매칭 후보 (상위 ${mc.length}건)</h4><div class="match-list">` +
+      mc.map(m => `<div class="match-item">
+        <span class="match-rank">#${m.rank}</span>
+        <span class="match-score ${simColor(m.score)}">${(m.score*100).toFixed(0)}%</span>
+        <span class="match-id">${m.candidate_source_id || ''}</span>
+        <span class="match-text">${truncate(m.candidate_text, 120)}</span>
+      </div>`).join('') + '</div></div>';
+  }
+
+  let actHtml = '';
+  if (acts.length) {
+    actHtml = `<div class="detail-section"><h4>🏢 부서 조치사항</h4>` +
+      acts.map(a => `<div class="action-item">
+        <span class="dept-tag">${a.primary_department || '미지정'}</span>
+        <span class="risk-tag risk-${a.risk_level}">${a.risk_level}</span>
+        <span>${truncate(a.preparation_task, 150)}</span>
+      </div>`).join('') + '</div>';
+  }
+
+  let historyHtml = '';
+  if (history.length) {
+    historyHtml = `<div class="detail-section"><h4>📜 검토 이력</h4><div class="history-list">` +
+      history.map(h => `<div class="history-item">
+        <span class="history-time">${h.created_at?.slice(0,16).replace('T',' ')}</span>
+        <span class="history-action">${h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : '메모'}</span>
+        ${h.note ? `<span class="history-note">${h.note}</span>` : ''}
+      </div>`).join('') + '</div></div>';
+  }
+
+  document.getElementById('modal-body').innerHTML = `
+    <div class="detail-header">
+      <div class="detail-meta">
+        <span class="change-id">${c.change_id}</span>
+        <span class="change-type-tag tag-${changeTypeCls(c.change_type)}">${c.change_type}</span>
+        <span class="section-tag">${c.section_type}</span>
+        ${statusBadge(c.verification_status)}
+        <span class="detail-criterion">${c.cycle4_criterion} ${c.cycle4_title}</span>
+      </div>
+    </div>
+
+    <div class="compare-container">
+      <div class="compare-col compare-3">
+        <div class="compare-label">3주기 <span class="compare-criterion">${c.cycle3_criterion || '—'} ${c.cycle3_title || ''}</span></div>
+        <div class="compare-text">${c.source_text_3 || '<span class="text-empty">해당 항목 없음 (신설 항목)</span>'}</div>
+        <div class="compare-id">${c.source_id_3 || ''}</div>
+      </div>
+      <div class="compare-arrow">
+        <div class="arrow-sim ${simColor(c.similarity)}">유사도<br><strong>${sim}</strong></div>
+        <div class="arrow-icon">→</div>
+      </div>
+      <div class="compare-col compare-4">
+        <div class="compare-label">4주기 <span class="compare-criterion">${c.cycle4_criterion} ${c.cycle4_title}</span></div>
+        <div class="compare-text">${c.source_text_4 || '<span class="text-empty">해당 항목 없음 (삭제/이동 항목)</span>'}</div>
+        <div class="compare-id">${c.source_id_4 || ''}</div>
+      </div>
+    </div>
+
+    ${matchHtml}
+    ${actHtml}
+
+    <div class="detail-section">
+      <h4>🏢 담당부서 배정 <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(복수 선택 가능)</span></h4>
+      <div class="dept-checkboxes" id="dept-cb-${c.change_id}">
+        ${allDepts.map(d => {
+          const checked = assignedDepts.some(a => a.dept_id === d.dept_id) ? 'checked' : '';
+          return `<label class="dept-cb-label"><input type="checkbox" value="${d.dept_id}" ${checked}><span class="dept-cb-name">${d.dept_name}</span><span class="dept-cb-cat">${d.category}</span></label>`;
+        }).join('')}
+      </div>
+      <button class="btn-note" style="margin-top:8px" onclick="saveDepts('${c.change_id}')">💾 부서 배정 저장</button>
+    </div>
+
+    <div class="detail-section">
+      <h4>✏️ 검토 액션</h4>
+      <div class="review-actions" id="review-actions-${c.change_id}">
+        <button class="btn-action btn-confirm" onclick="setStatus('${c.change_id}','confirmed')">✅ 확정</button>
+        <button class="btn-action btn-reject" onclick="setStatus('${c.change_id}','rejected')">❌ 반려</button>
+        <button class="btn-action btn-defer" onclick="setStatus('${c.change_id}','deferred')">⏸ 보류</button>
+        <button class="btn-action btn-reset" onclick="setStatus('${c.change_id}','needs_review')">🔄 검토필요로 복원</button>
+      </div>
+      <div class="note-input-group">
+        <textarea id="note-input-${c.change_id}" placeholder="검토 메모를 입력하세요..." rows="2"></textarea>
+        <button class="btn-note" onclick="addNote('${c.change_id}')">💬 메모 저장</button>
+      </div>
+    </div>
+
+    ${historyHtml}
+  `;
+}
+
+function closeModal(e) {
+  if (e && e.target !== document.getElementById('modal-overlay')) return;
+  document.getElementById('modal-overlay').classList.remove('open');
+  if (!e) document.getElementById('modal-overlay').classList.remove('open');
+}
+
+// ── Review Actions ──
+async function setStatus(changeId, status) {
+  const noteEl = document.getElementById(`note-input-${changeId}`);
+  const note = noteEl ? noteEl.value.trim() : '';
+
+  const res = await fetch(`/api/change/${changeId}/status`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status, note})
+  });
+  const d = await res.json();
+  if (d.ok) {
+    showToast(`${changeId}: ${status} 처리 완료`);
+    openDetail(changeId);  // refresh detail
+    loadChanges();          // refresh list
+  } else {
+    showToast(`오류: ${d.error}`, true);
+  }
+}
+
+async function addNote(changeId) {
+  const noteEl = document.getElementById(`note-input-${changeId}`);
+  const note = noteEl.value.trim();
+  if (!note) return showToast('메모를 입력하세요', true);
+
+  const res = await fetch(`/api/change/${changeId}/note`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note})
+  });
+  const d = await res.json();
+  if (d.ok) {
+    noteEl.value = '';
+    showToast('메모 저장 완료');
+    openDetail(changeId);
+  }
+}
+
+async function saveDepts(changeId) {
+  const container = document.getElementById(`dept-cb-${changeId}`);
+  const checked = [...container.querySelectorAll('input:checked')].map(cb => parseInt(cb.value));
+  const res = await fetch(`/api/change/${changeId}/departments`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dept_ids: checked})
+  });
+  const d = await res.json();
+  if (d.ok) showToast(`${d.count}개 부서 배정 완료`);
+}
+
+function showToast(msg, isError=false) {
+  const t = document.createElement('div');
+  t.className = `toast ${isError ? 'toast-error' : 'toast-success'}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('show'), 10);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2500);
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

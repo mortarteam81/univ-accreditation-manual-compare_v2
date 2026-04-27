@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>전체 비교 — 인증평가 편람</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/fullview.css">
+</head>
+<body>
+<div class="app-container">
+
+  <!-- HEADER -->
+  <header class="app-header animate-in">
+    <div class="header-left">
+      <a href="/" class="back-link">← 대시보드</a>
+      <div class="header-icon">📖</div>
+      <div>
+        <h1 class="header-title">전체 비교 뷰</h1>
+        <p class="header-subtitle" id="page-subtitle">4주기 편람 기준 · 섹션을 선택하세요</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <a href="/review" class="back-link">🔍 항목 검토</a>
+      <span class="header-badge badge-live" id="total-count">—</span>
+    </div>
+  </header>
+
+  <!-- SECTION TABS -->
+  <nav class="section-tabs animate-in" id="section-tabs">
+    <button class="tab active" data-section="overview" onclick="switchTab(this)">📄 개요</button>
+    <button class="tab" data-section="report" onclick="switchTab(this)">📝 보고서</button>
+    <button class="tab" data-section="evidence" onclick="switchTab(this)">📎 근거자료</button>
+    <button class="tab" data-section="checkpoints" onclick="switchTab(this)">✅ 점검사항</button>
+    <button class="tab" data-section="notes" onclick="switchTab(this)">📌 유의사항</button>
+  </nav>
+
+  <!-- CRITERION NAV (sticky) -->
+  <div class="criterion-nav" id="criterion-nav"></div>
+
+  <!-- MAIN CONTENT -->
+  <div id="fullview-content">
+    <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+  </div>
+
+</div>
+
+<!-- Action toast -->
+<script>
+const API = path => fetch(path).then(r => r.json());
+let currentSection = 'overview';
+
+const sectionNames = {
+  overview: '개요', report: '보고서 주요내용',
+  evidence: '근거자료', checkpoints: '주요 점검사항',
+  notes: '유의사항 및 관련 정책'
+};
+
+function switchTab(btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  currentSection = btn.dataset.section;
+  loadFullView(currentSection);
+}
+
+// URL param support
+function init() {
+  const params = new URLSearchParams(location.search);
+  const sec = params.get('section');
+  if (sec && sectionNames[sec]) {
+    document.querySelectorAll('.tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.section === sec);
+    });
+    currentSection = sec;
+  }
+  loadFullView(currentSection);
+}
+
+function changeTypeCls(t) {
+  const m = {'유지':'maintained','변경':'changed','신설후보':'new','삭제후보':'deleted','삭제/이동후보':'deleted','이동후보':'moved'};
+  return m[t] || 'changed';
+}
+
+function statusBadge(s) {
+  const m = {confirmed:['확정','st-confirmed'], needs_review:['검토필요','st-review'],
+    candidate:['후보','st-candidate'], rejected:['반려','st-rejected'], deferred:['보류','st-deferred']};
+  const [l, c] = m[s] || [s, 'st-candidate'];
+  return `<span class="fv-status ${c}">${l}</span>`;
+}
+
+async function loadFullView(section) {
+  const container = document.getElementById('fullview-content');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>';
+
+  const data = await API(`/api/fullview?section=${section}`);
+
+  const totalItems = data.reduce((s, g) => s + g.items.length, 0);
+  document.getElementById('total-count').textContent = `${totalItems}건`;
+  document.getElementById('page-subtitle').textContent =
+    `4주기 편람 기준 · ${sectionNames[section]} — ${data.length}개 준거, ${totalItems}건`;
+
+  // Build criterion nav
+  const nav = document.getElementById('criterion-nav');
+  nav.innerHTML = data.map(g =>
+    `<a href="#cr-${g.criterion}" class="nav-chip" title="${g.title}">${g.criterion}</a>`
+  ).join('');
+
+  // Build content
+  let html = '';
+  data.forEach((g, gi) => {
+    const confirmed = g.items.filter(i => i.verification_status === 'confirmed').length;
+    const total = g.items.length;
+    const pct = total > 0 ? (confirmed / total * 100).toFixed(0) : 0;
+
+    html += `
+    <div class="criterion-block" id="cr-${g.criterion}">
+      <div class="cb-header" onclick="toggleBlock(this)">
+        <div class="cb-left">
+          <span class="cb-id">${g.criterion}</span>
+          <span class="cb-title">${g.title}</span>
+          <span class="cb-count">${total}건</span>
+        </div>
+        <div class="cb-right">
+          <div class="cb-progress-bar"><div class="cb-progress-fill" style="width:${pct}%"></div></div>
+          <span class="cb-pct">${pct}%</span>
+          <span class="cb-toggle">▼</span>
+        </div>
+      </div>
+      <div class="cb-body open">
+        <table class="fv-table">
+          <thead>
+            <tr>
+              <th class="th-status">상태</th>
+              <th class="th-type">유형</th>
+              <th class="th-text">3주기 원문</th>
+              <th class="th-sim">유사도</th>
+              <th class="th-text">4주기 원문</th>
+              <th class="th-action">액션</th>
+            </tr>
+          </thead>
+          <tbody>`;
+
+    g.items.forEach(item => {
+      const sim = item.similarity ? `${(item.similarity * 100).toFixed(0)}%` : '—';
+      const simCls = item.similarity >= 0.8 ? 'sim-high' : item.similarity >= 0.5 ? 'sim-mid' : 'sim-low';
+      const typeCls = changeTypeCls(item.change_type);
+
+      html += `
+            <tr class="fv-row fv-row-${typeCls}" id="row-${item.change_id}">
+              <td class="td-status">${statusBadge(item.verification_status)}</td>
+              <td class="td-type"><span class="fv-type-tag type-${typeCls}">${item.change_type}</span></td>
+              <td class="td-text td-text-3">${item.source_text_3 || '<em class="empty">해당 없음</em>'}</td>
+              <td class="td-sim ${simCls}">${sim}</td>
+              <td class="td-text td-text-4">${item.source_text_4 || '<em class="empty">해당 없음</em>'}</td>
+              <td class="td-action">
+                <div class="inline-actions">
+                  <button class="ia-btn ia-confirm" title="확정" onclick="quickAction('${item.change_id}','confirmed',this)">✓</button>
+                  <button class="ia-btn ia-reject" title="반려" onclick="quickAction('${item.change_id}','rejected',this)">✗</button>
+                  <button class="ia-btn ia-defer" title="보류" onclick="quickAction('${item.change_id}','deferred',this)">⏸</button>
+                  <button class="ia-btn ia-detail" title="상세" onclick="window.open('/review?criterion=${g.criterion}','_blank')">⋯</button>
+                </div>
+              </td>
+            </tr>`;
+    });
+
+    html += `
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+  });
+
+  container.innerHTML = html;
+}
+
+function toggleBlock(header) {
+  const body = header.nextElementSibling;
+  const toggle = header.querySelector('.cb-toggle');
+  body.classList.toggle('open');
+  toggle.textContent = body.classList.contains('open') ? '▼' : '▶';
+}
+
+async function quickAction(changeId, status, btn) {
+  const row = document.getElementById(`row-${changeId}`);
+  btn.disabled = true;
+
+  const res = await fetch(`/api/change/${changeId}/status`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status})
+  });
+  const d = await res.json();
+
+  if (d.ok) {
+    // Update status badge in-place
+    const statusCell = row.querySelector('.td-status');
+    statusCell.innerHTML = statusBadge(status);
+
+    // Flash effect
+    row.classList.add('flash-' + (status === 'confirmed' ? 'green' : status === 'rejected' ? 'red' : 'purple'));
+    setTimeout(() => row.classList.remove('flash-green','flash-red','flash-purple'), 800);
+
+    showToast(`${changeId}: ${status}`);
+  }
+  btn.disabled = false;
+}
+
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.className = 'fv-toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 1800);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>증빙자료 관리 — 인증평가 편람</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/evidence.css">
+</head>
+<body>
+<div class="app-container">
+
+  <!-- HEADER -->
+  <header class="app-header animate-in">
+    <div class="header-left">
+      <a href="/" class="back-link">← 대시보드</a>
+      <div class="header-icon">📎</div>
+      <div>
+        <h1 class="header-title">증빙자료 등록·관리</h1>
+        <p class="header-subtitle" id="page-subtitle">3주기 증빙자료를 등록하고 4주기 준비에 활용하세요</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="header-badge badge-live" id="total-count">0건</span>
+    </div>
+  </header>
+
+  <!-- TOOLBAR -->
+  <div class="ev-toolbar animate-in">
+    <div class="ev-filter-group">
+      <label>준거</label>
+      <select id="f-criterion"><option value="">전체</option></select>
+    </div>
+    <div class="ev-filter-group">
+      <label>주기</label>
+      <select id="f-cycle">
+        <option value="">전체</option>
+        <option value="3" selected>3주기</option>
+        <option value="4">4주기</option>
+      </select>
+    </div>
+    <button class="btn-primary" onclick="loadEvidence()">🔍 조회</button>
+    <div style="flex:1"></div>
+    <button class="btn-accent" onclick="openAddModal()">＋ 증빙자료 등록</button>
+  </div>
+
+  <!-- SUMMARY BAR -->
+  <div class="ev-summary" id="ev-summary"></div>
+
+  <!-- EVIDENCE TABLE -->
+  <div class="ev-content" id="ev-content">
+    <div class="loading"><div class="spinner"></div>준거를 선택하고 조회하세요</div>
+  </div>
+
+</div>
+
+<!-- ADD/EDIT MODAL -->
+<div class="modal-overlay" id="ev-modal" onclick="closeEvModal(event)">
+  <div class="modal-content ev-modal-body" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeEvModal()">&times;</button>
+    <h3 id="ev-modal-title">📎 증빙자료 등록</h3>
+    <input type="hidden" id="ev-edit-id">
+    <div class="ev-form">
+      <div class="ev-form-row">
+        <label>주기 *</label>
+        <select id="ev-cycle"><option value="3">3주기</option><option value="4">4주기</option></select>
+      </div>
+      <div class="ev-form-row">
+        <label>준거 *</label>
+        <select id="ev-criterion"></select>
+      </div>
+      <div class="ev-form-row">
+        <label>자료 제목 *</label>
+        <input id="ev-title" placeholder="예: 교육과정 편성 현황표">
+      </div>
+      <div class="ev-form-row">
+        <label>관리번호</label>
+        <input id="ev-number" placeholder="예: 1.1-01">
+      </div>
+      <div class="ev-form-row">
+        <label>파일 위치</label>
+        <input id="ev-location" placeholder="예: 공유폴더/인증평가/1.1/">
+      </div>
+      <div class="ev-form-row">
+        <label>재활용 가능</label>
+        <select id="ev-reusable">
+          <option value="1">예 — 4주기에 재활용 가능</option>
+          <option value="0">아니오 — 갱신 필요</option>
+        </select>
+      </div>
+      <div class="ev-form-row">
+        <label>비고</label>
+        <textarea id="ev-notes" rows="2" placeholder="추가 메모"></textarea>
+      </div>
+      <div class="ev-form-actions">
+        <button class="btn-primary" onclick="saveEvidence()">💾 저장</button>
+        <button class="btn-secondary" onclick="closeEvModal()">취소</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = path => fetch(path).then(r => r.json());
+let criteriaList = [];
+
+async function init() {
+  criteriaList = await API('/api/criteria-list');
+  const sel = document.getElementById('f-criterion');
+  const selForm = document.getElementById('ev-criterion');
+  criteriaList.forEach(c => {
+    const label = `${c.cycle4_criterion} ${c.cycle4_title}`;
+    sel.appendChild(new Option(label, c.cycle4_criterion));
+    selForm.appendChild(new Option(label, c.cycle4_criterion));
+  });
+  loadEvidence();
+}
+
+async function loadEvidence() {
+  const crit = document.getElementById('f-criterion').value;
+  const cycle = document.getElementById('f-cycle').value;
+  const q = new URLSearchParams();
+  if (crit) q.set('criterion', crit);
+  if (cycle) q.set('cycle', cycle);
+
+  const container = document.getElementById('ev-content');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div>로딩 중...</div>';
+
+  const data = await API(`/api/evidence?${q}`);
+  document.getElementById('total-count').textContent = `${data.length}건`;
+
+  if (!data.length) {
+    container.innerHTML = '<div class="ev-empty">등록된 증빙자료가 없습니다. <strong>＋ 증빙자료 등록</strong> 버튼으로 추가하세요.</div>';
+    document.getElementById('ev-summary').innerHTML = '';
+    return;
+  }
+
+  // Group by criterion
+  const groups = {};
+  data.forEach(d => {
+    if (!groups[d.criterion]) groups[d.criterion] = [];
+    groups[d.criterion].push(d);
+  });
+
+  let html = '';
+  Object.entries(groups).forEach(([cr, items]) => {
+    const title = criteriaList.find(c => c.cycle4_criterion === cr)?.cycle4_title || '';
+    html += `
+    <div class="ev-group">
+      <div class="ev-group-header">
+        <span class="ev-group-id">${cr}</span>
+        <span class="ev-group-title">${title}</span>
+        <span class="ev-group-count">${items.length}건</span>
+      </div>
+      <table class="ev-table">
+        <thead><tr>
+          <th>주기</th><th>관리번호</th><th>자료 제목</th><th>위치</th><th>재활용</th><th>비고</th><th>액션</th>
+        </tr></thead>
+        <tbody>`;
+    items.forEach(d => {
+      const reuse = d.is_reusable ? '<span class="ev-reuse-yes">✓ 가능</span>' : '<span class="ev-reuse-no">✗ 갱신</span>';
+      html += `<tr>
+        <td class="td-cycle">${d.cycle}주기</td>
+        <td class="td-num">${d.doc_number || '—'}</td>
+        <td class="td-title">${d.doc_title}</td>
+        <td class="td-loc">${d.doc_location || '—'}</td>
+        <td class="td-reuse">${reuse}</td>
+        <td class="td-notes">${d.notes || ''}</td>
+        <td class="td-actions">
+          <button class="ev-btn-edit" onclick='editEvidence(${JSON.stringify(d)})'>✎</button>
+          <button class="ev-btn-del" onclick="deleteEvidence(${d.ev_id})">✗</button>
+        </td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+  });
+
+  container.innerHTML = html;
+
+  // Summary
+  const total = data.length;
+  const c3 = data.filter(d => d.cycle === '3').length;
+  const c4 = data.filter(d => d.cycle === '4').length;
+  const reusable = data.filter(d => d.is_reusable).length;
+  document.getElementById('ev-summary').innerHTML = `
+    <span class="ev-sum-item">전체 <strong>${total}</strong></span>
+    <span class="ev-sum-item">3주기 <strong>${c3}</strong></span>
+    <span class="ev-sum-item">4주기 <strong>${c4}</strong></span>
+    <span class="ev-sum-item ev-sum-reuse">재활용가능 <strong>${reusable}</strong> (${(reusable/total*100).toFixed(0)}%)</span>
+  `;
+}
+
+function openAddModal() {
+  document.getElementById('ev-modal-title').textContent = '📎 증빙자료 등록';
+  document.getElementById('ev-edit-id').value = '';
+  document.getElementById('ev-cycle').value = '3';
+  document.getElementById('ev-criterion').value = document.getElementById('f-criterion').value || criteriaList[0]?.cycle4_criterion || '';
+  document.getElementById('ev-title').value = '';
+  document.getElementById('ev-number').value = '';
+  document.getElementById('ev-location').value = '';
+  document.getElementById('ev-reusable').value = '1';
+  document.getElementById('ev-notes').value = '';
+  document.getElementById('ev-modal').classList.add('open');
+}
+
+function editEvidence(d) {
+  document.getElementById('ev-modal-title').textContent = '✏️ 증빙자료 수정';
+  document.getElementById('ev-edit-id').value = d.ev_id;
+  document.getElementById('ev-cycle').value = d.cycle;
+  document.getElementById('ev-criterion').value = d.criterion;
+  document.getElementById('ev-title').value = d.doc_title;
+  document.getElementById('ev-number').value = d.doc_number || '';
+  document.getElementById('ev-location').value = d.doc_location || '';
+  document.getElementById('ev-reusable').value = d.is_reusable ? '1' : '0';
+  document.getElementById('ev-notes').value = d.notes || '';
+  document.getElementById('ev-modal').classList.add('open');
+}
+
+function closeEvModal(e) {
+  if (e && e.target !== document.getElementById('ev-modal')) return;
+  document.getElementById('ev-modal').classList.remove('open');
+  if (!e) document.getElementById('ev-modal').classList.remove('open');
+}
+
+async function saveEvidence() {
+  const evId = document.getElementById('ev-edit-id').value;
+  const body = {
+    cycle: document.getElementById('ev-cycle').value,
+    criterion: document.getElementById('ev-criterion').value,
+    doc_title: document.getElementById('ev-title').value.trim(),
+    doc_number: document.getElementById('ev-number').value.trim(),
+    doc_location: document.getElementById('ev-location').value.trim(),
+    is_reusable: parseInt(document.getElementById('ev-reusable').value),
+    notes: document.getElementById('ev-notes').value.trim(),
+  };
+  if (!body.doc_title) return showToast('자료 제목을 입력하세요', true);
+
+  let res;
+  if (evId) {
+    res = await fetch(`/api/evidence/${evId}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  } else {
+    res = await fetch('/api/evidence', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  }
+  const d = await res.json();
+  if (d.ok) {
+    showToast(evId ? '수정 완료' : '등록 완료');
+    closeEvModal();
+    loadEvidence();
+  } else {
+    showToast(d.error || '오류 발생', true);
+  }
+}
+
+async function deleteEvidence(evId) {
+  if (!confirm('이 증빙자료를 삭제하시겠습니까?')) return;
+  const res = await fetch(`/api/evidence/${evId}`, {method:'DELETE'});
+  const d = await res.json();
+  if (d.ok) { showToast('삭제 완료'); loadEvidence(); }
+}
+
+function showToast(msg, isError=false) {
+  const t = document.createElement('div');
+  t.className = `toast ${isError ? 'toast-error' : 'toast-success'}`;
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('show'), 10);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 2500);
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeEvModal(); });
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

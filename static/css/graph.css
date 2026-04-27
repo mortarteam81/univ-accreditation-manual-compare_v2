@@ -1,0 +1,161 @@
+/* ================================================
+   지식그래프 & AI 어시스턴트 전용 스타일
+   ================================================ */
+
+.graph-layout {
+  display: flex;
+  height: 100vh;
+  gap: 16px;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+/* ─── Left: Graph Panel ─── */
+.graph-panel {
+  flex: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.back-link {
+  color: var(--text-muted); text-decoration: none; font-size: 0.85rem;
+  font-weight: 600; padding: 6px 12px; border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+.back-link:hover { color: var(--text-primary); background: rgba(255,255,255,0.05); }
+
+.legend { display: flex; gap: 12px; }
+.lgd-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.75rem; font-weight: 600; color: var(--text-muted);
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; }
+
+.graph-container {
+  flex: 1;
+  width: 100%;
+  height: 0; /* flex 속성과 함께 쓰여 무한확장 방지 */
+  min-height: 400px;
+  background: rgba(10,14,26,0.5);
+  position: relative;
+}
+/* vis.js 툴팁 오버라이드 */
+.vis-tooltip {
+  background-color: rgba(17,24,39,0.9) !important;
+  border: 1px solid var(--border-glass) !important;
+  color: #fff !important;
+  border-radius: var(--radius-md) !important;
+  font-family: var(--font-sans) !important;
+  font-size: 0.8rem !important;
+  padding: 10px 14px !important;
+  box-shadow: var(--shadow-lg) !important;
+  white-space: pre-wrap !important;
+}
+
+/* ─── Right: AI Panel ─── */
+.ai-panel {
+  flex: 1;
+  min-width: 380px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-glass);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-xl);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.ai-header {
+  padding: 16px 20px;
+  background: rgba(255,255,255,0.02);
+  border-bottom: 1px solid var(--border-glass);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.ai-title { font-weight: 800; font-size: 1.05rem; color: var(--text-primary); }
+.ai-model { 
+  font-size: 0.7rem; font-family: var(--font-mono); font-weight: 700;
+  color: var(--accent-indigo); background: rgba(99,102,241,0.1);
+  padding: 3px 8px; border-radius: 4px;
+}
+
+.ai-context-selector {
+  padding: 16px 20px 0;
+}
+.ai-context-selector select {
+  width: 100%; padding: 10px 12px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(99,102,241,0.3);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary); font-size: 0.85rem; font-weight: 600;
+}
+.ai-context-selector select:focus { outline: none; border-color: var(--accent-indigo); }
+.ai-context-selector select option { background: var(--bg-secondary); }
+
+.ai-quick-actions {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-glass);
+}
+.ai-quick-actions button {
+  background: rgba(255,255,255,0.03); border: 1px solid var(--border-glass);
+  padding: 8px; border-radius: var(--radius-sm); color: var(--text-secondary);
+  font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all var(--transition-fast);
+}
+.ai-quick-actions button:hover {
+  background: rgba(99,102,241,0.1); border-color: rgba(99,102,241,0.3);
+  color: var(--accent-indigo); transform: translateY(-1px);
+}
+
+.chat-area {
+  flex: 1;
+  padding: 20px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.chat-msg {
+  max-width: 85%; padding: 12px 16px; border-radius: var(--radius-lg);
+  font-size: 0.88rem; line-height: 1.6; word-break: keep-all;
+}
+.user-msg {
+  align-self: flex-end; background: var(--gradient-primary); color: white;
+  border-bottom-right-radius: 4px;
+}
+.ai-msg {
+  align-self: flex-start; background: rgba(255,255,255,0.05); color: var(--text-primary);
+  border: 1px solid var(--border-glass); border-bottom-left-radius: 4px;
+}
+.ai-msg li { margin-left: 16px; margin-bottom: 4px; }
+.ctx-badge {
+  display: inline-block; font-size: 0.7rem; font-weight: 700; color: var(--accent-emerald);
+  background: rgba(16,185,129,0.1); padding: 2px 8px; border-radius: 4px;
+}
+.loading-msg { color: var(--text-muted); font-style: italic; }
+
+.chat-input-area {
+  display: flex; gap: 10px; padding: 16px 20px;
+  background: rgba(255,255,255,0.02); border-top: 1px solid var(--border-glass);
+}
+.chat-input-area textarea {
+  flex: 1; padding: 12px; background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border-glass); border-radius: var(--radius-md);
+  color: var(--text-primary); font-family: var(--font-sans); font-size: 0.9rem;
+  resize: none; transition: border-color var(--transition-fast);
+}
+.chat-input-area textarea:focus { outline: none; border-color: var(--accent-indigo); }
+.btn-send {
+  background: var(--accent-indigo); color: white; border: none; font-weight: 700;
+  border-radius: var(--radius-md); padding: 0 20px; cursor: pointer; transition: all 0.2s;
+}
+.btn-send:hover { background: #4f46e5; box-shadow: var(--shadow-glow-indigo); }
+
+/* Responsive */
+@media (max-width: 1100px) {
+  .graph-layout { flex-direction: column; }
+  .graph-panel { flex: none; height: 50vh; }
+  .ai-panel { flex: 1; }
+}

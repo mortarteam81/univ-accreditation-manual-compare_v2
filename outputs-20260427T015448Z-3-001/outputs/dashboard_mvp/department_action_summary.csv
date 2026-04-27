@@ -1,0 +1,12 @@
+﻿primary_department,action_count,high_risk_count,medium_risk_count,official_confirmation_needed_count,criteria,action_type_counts
+교무처,173,119,54,173,2.1;2.2;2.3;2.4;2.5;3.1;3.2;3.3,new_requirement_review:91;deletion_or_move_review:29;content_change_review:24;metric_or_standard_update:15;evidence_preparation_update:11;monitoring_review:3
+기획처,151,103,48,151,1.1;1.2;1.3;1.4;1.5,new_requirement_review:63;deletion_or_move_review:30;move_review:17;content_change_review:16;metric_or_standard_update:15;evidence_preparation_update:8;monitoring_review:2
+학생상담센터,66,66,0,66,4.2,new_requirement_review:17;evidence_preparation_update:16;metric_or_standard_update:13;monitoring_review:7;deletion_or_move_review:6;content_change_review:6;move_review:1
+연구처,60,60,0,60,3.4,metric_or_standard_update:18;new_requirement_review:16;deletion_or_move_review:15;evidence_preparation_update:7;content_change_review:3;move_review:1
+사회공헌 담당부서,51,41,10,51,1.6,new_requirement_review:22;deletion_or_move_review:20;content_change_review:4;metric_or_standard_update:3;evidence_preparation_update:2
+총무처,50,35,15,50,3.5;3.6,new_requirement_review:33;metric_or_standard_update:6;content_change_review:6;deletion_or_move_review:5
+진로·취창업지원센터,27,27,0,27,4.3,content_change_review:6;new_requirement_review:5;metric_or_standard_update:4;move_review:4;deletion_or_move_review:3;evidence_preparation_update:3;monitoring_review:2
+시설관리팀,16,11,5,16,4.4,deletion_or_move_review:7;metric_or_standard_update:4;new_requirement_review:2;monitoring_review:2;content_change_review:1
+학생처,12,8,4,12,4.1;4.5,new_requirement_review:8;content_change_review:3;deletion_or_move_review:1
+교수학습지원센터,15,6,9,15,2.6,new_requirement_review:8;content_change_review:4;metric_or_standard_update:1;deletion_or_move_review:1;monitoring_review:1
+도서관,17,5,12,17,4.6,metric_or_standard_update:9;new_requirement_review:4;content_change_review:2;deletion_or_move_review:1;evidence_preparation_update:1

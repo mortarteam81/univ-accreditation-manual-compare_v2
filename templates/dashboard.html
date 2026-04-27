@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>인증평가 편람 비교분석 대시보드</title>
+  <meta name="description" content="3주기·4주기 대학기관평가인증 편람 비교분석 결과 시각화 대시보드">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="app-container">
+
+  <!-- ═══════ HEADER ═══════ -->
+  <header class="app-header animate-in" id="app-header">
+    <div class="header-left">
+      <div class="header-icon">📊</div>
+      <div>
+        <h1 class="header-title">인증평가 편람 비교분석</h1>
+        <p class="header-subtitle">3주기 → 4주기 대학기관평가인증 편람 변경사항 검토 대시보드</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <a href="/graph" style="color:#6366f1;text-decoration:none;font-size:0.85rem;font-weight:600;padding:6px 14px;border:1px solid rgba(99,102,241,0.3);border-radius:999px;">🕸️ AI 어시스턴트</a>
+      <a href="/fullview" style="color:var(--text-accent);text-decoration:none;font-size:0.85rem;font-weight:600;padding:6px 14px;border:1px solid var(--border-highlight);border-radius:999px;">📖 전체 비교</a>
+      <a href="/evidence" style="color:var(--accent-emerald);text-decoration:none;font-size:0.85rem;font-weight:600;padding:6px 14px;border:1px solid rgba(16,185,129,0.3);border-radius:999px;">📎 증빙자료</a>
+      <span class="header-badge badge-live">DB 연결됨</span>
+    </div>
+  </header>
+
+  <!-- ═══════ SUMMARY STATS ═══════ -->
+  <section class="stats-grid" id="stats-section">
+    <div class="stat-card accent-indigo animate-in delay-1" id="stat-total">
+      <div class="stat-label">총 변경사항</div>
+      <div class="stat-value" id="val-total-changes">—</div>
+      <div class="stat-sub" id="sub-total">로딩 중...</div>
+    </div>
+    <div class="stat-card accent-emerald animate-in delay-2" id="stat-confirmed">
+      <div class="stat-label">확정 (Confirmed)</div>
+      <div class="stat-value" id="val-confirmed">—</div>
+      <div class="stat-sub" id="sub-confirmed">검증 완료</div>
+    </div>
+    <div class="stat-card accent-amber animate-in delay-3" id="stat-needs-review">
+      <div class="stat-label">검토 필요</div>
+      <div class="stat-value" id="val-needs-review">—</div>
+      <div class="stat-sub" id="sub-needs-review">수동 확인 대기</div>
+    </div>
+    <div class="stat-card accent-rose animate-in delay-4" id="stat-high-risk">
+      <div class="stat-label">고위험 항목</div>
+      <div class="stat-value" id="val-high-risk">—</div>
+      <div class="stat-sub" id="sub-high-risk">우선 검토 필요</div>
+    </div>
+    <div class="stat-card accent-cyan animate-in delay-5" id="stat-criteria">
+      <div class="stat-label">평가 준거</div>
+      <div class="stat-value" id="val-criteria">—</div>
+      <div class="stat-sub" id="sub-criteria">4주기 기준</div>
+    </div>
+    <div class="stat-card accent-violet animate-in delay-6" id="stat-sources">
+      <div class="stat-label">원문 항목</div>
+      <div class="stat-value" id="val-sources">—</div>
+      <div class="stat-sub" id="sub-sources">3주기 + 4주기</div>
+    </div>
+  </section>
+
+  <!-- ═══════ GLOBAL LEGEND ═══════ -->
+  <div class="global-legend animate-in">
+    <div class="legend-item"><span class="legend-dot" style="background:var(--accent-emerald)"></span> 유지</div>
+    <div class="legend-item"><span class="legend-dot" style="background:var(--accent-amber)"></span> 변경</div>
+    <div class="legend-item"><span class="legend-dot" style="background:var(--accent-cyan)"></span> 신설후보</div>
+    <div class="legend-item"><span class="legend-dot" style="background:var(--accent-rose)"></span> 삭제/이동후보·삭제후보</div>
+    <div class="legend-item"><span class="legend-dot" style="background:var(--accent-violet)"></span> 이동후보</div>
+  </div>
+
+  <!-- ═══════ CRITERIA PROGRESS ═══════ -->
+  <section class="card animate-in" id="criteria-section">
+    <h2 class="section-title"><span class="icon">📋</span> 준거별 검토 진행률 (24개 준거)</h2>
+    <div class="criteria-grid" id="criteria-grid">
+      <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+    </div>
+  </section>
+
+  <!-- ═══════ TWO-COLUMN GRID ═══════ -->
+  <div class="dashboard-grid">
+
+    <!-- LEFT: Risk Heatmap -->
+    <section class="card animate-in" id="heatmap-section">
+      <h2 class="section-title"><span class="icon">🔥</span> 위험도 히트맵 (준거 × 섹션)</h2>
+      <div class="heatmap-container" id="heatmap-container">
+        <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Section Stats -->
+    <section class="card animate-in" id="section-stats-section">
+      <h2 class="section-title"><span class="icon">📂</span> 섹션 유형별 변경 현황</h2>
+      <div id="section-stats-container">
+        <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+      </div>
+    </section>
+
+    <!-- LEFT: Department Workload -->
+    <section class="card animate-in" id="dept-section">
+      <h2 class="section-title"><span class="icon">🏢</span> 부서별 업무량 및 위험도</h2>
+      <div class="dept-bar-container" id="dept-bars">
+        <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+      </div>
+    </section>
+
+    <!-- RIGHT: Mapping Overview -->
+    <section class="card animate-in" id="mapping-section">
+      <h2 class="section-title"><span class="icon">🔗</span> 3주기 → 4주기 준거 매핑</h2>
+      <div id="mapping-container">
+        <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
+      </div>
+    </section>
+
+  </div><!-- /dashboard-grid -->
+
+</div><!-- /app-container -->
+
+<script>
+// ─── API helper ───
+async function fetchAPI(endpoint) {
+  const res = await fetch(endpoint);
+  return res.json();
+}
+
+function animateCount(el, target, duration = 800) {
+  const start = 0;
+  const startTime = performance.now();
+  function update(now) {
+    const elapsed = now - startTime;
+    const progress = Math.min(elapsed / duration, 1);
+    const ease = 1 - Math.pow(1 - progress, 3);
+    el.textContent = Math.round(start + (target - start) * ease).toLocaleString();
+    if (progress < 1) requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+}
+
+// ─── 1. Overview Stats ───
+async function loadOverview() {
+  const d = await fetchAPI('/api/overview');
+
+  animateCount(document.getElementById('val-total-changes'), d.total_changes);
+  document.getElementById('sub-total').textContent = `${d.total_criteria}개 준거 · ${Object.keys(d.change_type_counts).length}개 유형`;
+
+  const confirmed = d.verification_counts['confirmed'] || 0;
+  animateCount(document.getElementById('val-confirmed'), confirmed);
+  const confirmPct = ((confirmed / d.total_changes) * 100).toFixed(1);
+  document.getElementById('sub-confirmed').textContent = `전체의 ${confirmPct}%`;
+
+  const needsReview = d.verification_counts['needs_review'] || 0;
+  animateCount(document.getElementById('val-needs-review'), needsReview);
+  document.getElementById('sub-needs-review').textContent = `후보 ${d.verification_counts['candidate'] || 0}건 별도`;
+
+  const highRisk = d.risk_counts['high'] || 0;
+  animateCount(document.getElementById('val-high-risk'), highRisk);
+  document.getElementById('sub-high-risk').textContent = `중위험 ${d.risk_counts['medium'] || 0}건`;
+
+  animateCount(document.getElementById('val-criteria'), d.total_criteria);
+  animateCount(document.getElementById('val-sources'), d.total_sources);
+}
+
+// ─── 2. Criteria Progress Cards ───
+async function loadCriteriaProgress() {
+  const data = await fetchAPI('/api/criteria-progress');
+  const grid = document.getElementById('criteria-grid');
+  grid.innerHTML = '';
+
+  data.forEach((c, i) => {
+    const pctClass = c.confirmed_pct >= 50 ? 'pct-high' : c.confirmed_pct >= 20 ? 'pct-mid' : 'pct-low';
+    const total = c.total_changes;
+    const segments = [
+      { cls: 'seg-maintained', val: c.cnt_maintained, label: '유지' },
+      { cls: 'seg-changed', val: c.cnt_changed, label: '변경' },
+      { cls: 'seg-new', val: c.cnt_new, label: '신설' },
+      { cls: 'seg-deleted', val: c.cnt_deleted, label: '삭제' },
+      { cls: 'seg-moved', val: c.cnt_moved, label: '이동' },
+    ];
+
+    const barSegments = segments
+      .filter(s => s.val > 0)
+      .map(s => `<div class="segment ${s.cls}" style="width:${(s.val/total*100).toFixed(1)}%" title="${s.label}: ${s.val}건"></div>`)
+      .join('');
+
+    const legendItems = segments
+      .filter(s => s.val > 0)
+      .map(s => `<span class="legend-item"><span class="legend-dot ${s.cls}"></span>${s.label} <span class="legend-count">${s.val}</span></span>`)
+      .join('');
+
+    const card = document.createElement('div');
+    card.className = `criterion-card animate-in`;
+    card.style.animationDelay = `${i * 0.03}s`;
+    card.style.cursor = 'pointer';
+    card.onclick = () => location.href = `/review?criterion=${c.cycle4_criterion}`;
+    card.innerHTML = `
+      <div class="criterion-header">
+        <span class="criterion-id">${c.cycle4_criterion}</span>
+        <span class="criterion-pct ${pctClass}">${c.confirmed_pct}% 확정</span>
+      </div>
+      <div class="criterion-title">${c.cycle4_title}</div>
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" style="width:${c.confirmed_pct}%"></div>
+      </div>
+      <div class="change-type-bar">${barSegments}</div>
+      <div class="change-legend">${legendItems}</div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+// ─── 3. Risk Heatmap ───
+async function loadHeatmap() {
+  const data = await fetchAPI('/api/risk-heatmap');
+  const container = document.getElementById('heatmap-container');
+
+  // Build matrix: criteria × sections
+  const criteriaSet = [...new Set(data.map(d => d.cycle4_criterion))].sort();
+  const sectionOrder = ['overview', 'report', 'evidence', 'checkpoints', 'notes'];
+  const sectionLabels = {
+    overview: '개요', report: '보고서', evidence: '근거자료',
+    checkpoints: '점검사항', notes: '유의사항'
+  };
+
+  const matrix = {};
+  data.forEach(d => {
+    const key = `${d.cycle4_criterion}__${d.section_type}`;
+    matrix[key] = d;
+  });
+
+  function heatLevel(high) {
+    if (high === 0) return 'heat-0';
+    if (high <= 2) return 'heat-1';
+    if (high <= 5) return 'heat-2';
+    if (high <= 10) return 'heat-3';
+    if (high <= 20) return 'heat-4';
+    return 'heat-5';
+  }
+
+  let html = '<table class="heatmap-table"><thead><tr><th></th>';
+  sectionOrder.forEach(s => { html += `<th>${sectionLabels[s]}</th>`; });
+  html += '</tr></thead><tbody>';
+
+  criteriaSet.forEach(cr => {
+    html += `<tr><th class="row-header">${cr}</th>`;
+    sectionOrder.forEach(sec => {
+      const d = matrix[`${cr}__${sec}`];
+      if (d) {
+        const cls = heatLevel(d.high_cnt);
+        html += `<td class="heatmap-cell ${cls}" title="고위험 ${d.high_cnt} / 중위험 ${d.medium_cnt}">${d.high_cnt > 0 ? d.high_cnt : '—'}</td>`;
+      } else {
+        html += `<td class="heatmap-cell heat-0">—</td>`;
+      }
+    });
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ─── 4. Section Stats ───
+async function loadSectionStats() {
+  const data = await fetchAPI('/api/section-stats');
+  const container = document.getElementById('section-stats-container');
+
+  const labels = {
+    overview: '📄 개요', report: '📝 보고서', evidence: '📎 근거자료',
+    checkpoints: '✅ 점검사항', notes: '📌 유의사항'
+  };
+
+  let html = '<div class="section-stats-grid">';
+  data.forEach(s => {
+    const label = labels[s.section_type] || s.section_type;
+    html += `
+      <div class="section-stat-card">
+        <div class="section-stat-label">${label}</div>
+        <div class="section-stat-value">${s.total}</div>
+        <div class="section-stat-detail">
+          유지 ${s.maintained} · 변경 ${s.changed} · 신설 ${s.new_candidate}
+        </div>
+      </div>
+    `;
+  });
+  html += '</div>';
+
+  // Stacked bar chart for each section
+  html += '<div style="margin-top:20px;">';
+  data.forEach(s => {
+    const label = labels[s.section_type] || s.section_type;
+    const total = s.total;
+    const pcts = {
+      maintained: (s.maintained / total * 100).toFixed(1),
+      changed: (s.changed / total * 100).toFixed(1),
+      new_candidate: (s.new_candidate / total * 100).toFixed(1),
+      deleted: (s.deleted / total * 100).toFixed(1),
+      moved: (s.moved / total * 100).toFixed(1),
+    };
+    html += `
+      <div style="display:grid; grid-template-columns:120px 1fr 40px; align-items:center; gap:10px; margin-bottom:8px;">
+        <span style="font-size:0.8rem; color:var(--text-secondary); text-align:right;">${label}</span>
+        <div class="change-type-bar" style="height:16px;">
+          <div class="segment seg-maintained" style="width:${pcts.maintained}%" title="유지 ${s.maintained}"></div>
+          <div class="segment seg-changed" style="width:${pcts.changed}%" title="변경 ${s.changed}"></div>
+          <div class="segment seg-new" style="width:${pcts.new_candidate}%" title="신설 ${s.new_candidate}"></div>
+          <div class="segment seg-deleted" style="width:${pcts.deleted}%" title="삭제 ${s.deleted}"></div>
+          <div class="segment seg-moved" style="width:${pcts.moved}%" title="이동 ${s.moved}"></div>
+        </div>
+        <span style="font-size:0.85rem; font-weight:700; font-family:var(--font-mono); text-align:right;">${total}</span>
+      </div>
+    `;
+  });
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
+// ─── 5. Department Workload ───
+async function loadDeptWorkload() {
+  const data = await fetchAPI('/api/department-workload');
+  const container = document.getElementById('dept-bars');
+  container.innerHTML = '';
+
+  const maxTotal = Math.max(...data.map(d => d.total_actions));
+
+  data.forEach((d, i) => {
+    const highPct = (d.high_risk / maxTotal * 100).toFixed(1);
+    const medPct = (d.medium_risk / maxTotal * 100).toFixed(1);
+
+    const row = document.createElement('div');
+    row.className = 'dept-row';
+    row.style.animation = `fadeInUp 0.4s ease both`;
+    row.style.animationDelay = `${i * 0.05}s`;
+    row.innerHTML = `
+      <div class="dept-name" title="${d.primary_department}">${d.primary_department}</div>
+      <div class="dept-bar-track">
+        <div class="dept-bar-high" style="width:${highPct}%" title="고위험 ${d.high_risk}건">${d.high_risk > 5 ? d.high_risk : ''}</div>
+        <div class="dept-bar-medium" style="width:${medPct}%" title="중위험 ${d.medium_risk}건">${d.medium_risk > 5 ? d.medium_risk : ''}</div>
+      </div>
+      <div class="dept-total">${d.total_actions}</div>
+    `;
+    container.appendChild(row);
+  });
+
+  // Legend
+  const legend = document.createElement('div');
+  legend.style.cssText = 'display:flex; gap:16px; justify-content:flex-end; margin-top:12px; font-size:0.75rem; color:var(--text-muted);';
+  legend.innerHTML = `
+    <span class="legend-item"><span class="legend-dot" style="background:var(--accent-rose)"></span> 고위험 (High)</span>
+    <span class="legend-item"><span class="legend-dot" style="background:var(--accent-amber)"></span> 중위험 (Medium)</span>
+  `;
+  container.appendChild(legend);
+}
+
+// ─── 6. Mapping Overview ───
+async function loadMapping() {
+  const data = await fetchAPI('/api/mapping-overview');
+  const container = document.getElementById('mapping-container');
+
+  let html = `
+    <table class="mapping-table">
+      <thead>
+        <tr>
+          <th>4주기</th>
+          <th></th>
+          <th>3주기</th>
+          <th>매핑 유형</th>
+          <th>유사도</th>
+          <th>상태</th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  data.forEach(m => {
+    const sim = m.title_similarity;
+    const simClass = sim >= 0.7 ? 'sim-high' : sim >= 0.5 ? 'sim-mid' : 'sim-low';
+    const statusClass = m.verification_status === 'confirmed' ? 'badge-confirmed'
+      : m.verification_status === 'needs_review' ? 'badge-needs-review' : 'badge-candidate';
+    const statusLabel = m.verification_status === 'confirmed' ? '확정'
+      : m.verification_status === 'needs_review' ? '검토필요' : '후보';
+
+    html += `
+      <tr>
+        <td><strong>${m.cycle4_criterion}</strong> ${m.cycle4_title}</td>
+        <td class="mapping-arrow">←</td>
+        <td><strong>${m.cycle3_criterion}</strong> ${m.cycle3_title}</td>
+        <td style="font-size:0.8rem; color:var(--text-secondary)">${m.raw_mapping_types || '—'}</td>
+        <td class="mapping-sim ${simClass}">${(sim * 100).toFixed(0)}%</td>
+        <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+// ─── Init ───
+async function init() {
+  try {
+    await Promise.all([
+      loadOverview(),
+      loadCriteriaProgress(),
+      loadHeatmap(),
+      loadSectionStats(),
+      loadDeptWorkload(),
+      loadMapping(),
+    ]);
+  } catch (err) {
+    console.error('Dashboard load error:', err);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+
+</body>
+</html>
