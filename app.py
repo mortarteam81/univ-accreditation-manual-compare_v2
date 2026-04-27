@@ -611,7 +611,7 @@ def api_ai_ask():
     result = ask_ai(DB_PATH, query, criterion, context_type)
     
     if "error" in result:
-        return jsonify({"error": result["error"]}), 500
+        return jsonify({"error": result["error"]}), result.get("status_code", 500)
         
     return jsonify(result)
 
