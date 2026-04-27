@@ -78,6 +78,11 @@
   border-color: rgba(99,102,241,0.3);
   color: var(--accent-indigo);
 }
+.nav-chip.has-note {
+  background: rgba(245,158,11,0.16);
+  border-color: rgba(245,158,11,0.36);
+  color: var(--accent-amber);
+}
 
 /* ─── Action Legend ─── */
 .action-legend {
@@ -133,6 +138,11 @@
   background: var(--bg-glass);
   backdrop-filter: blur(8px);
 }
+.criterion-block.has-note {
+  background: linear-gradient(135deg, rgba(99,102,241,0.16), rgba(245,158,11,0.08)), var(--bg-glass);
+  border-color: rgba(245,158,11,0.42);
+  box-shadow: inset 3px 0 0 var(--accent-amber);
+}
 .cb-header {
   display: flex;
   align-items: center;
@@ -157,6 +167,17 @@
 }
 .cb-title { font-weight: 700; font-size: 0.95rem; }
 .cb-count { font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono); }
+.fv-note-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.20);
+  border: 1px solid rgba(245,158,11,0.34);
+  color: var(--accent-amber);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
 
 .cb-right { display: flex; align-items: center; gap: 10px; }
 .cb-progress-bar {
@@ -204,6 +225,12 @@
   transition: background 0.2s ease;
 }
 .fv-row:hover { background: rgba(99,102,241,0.04); }
+.fv-row.has-note {
+  background: linear-gradient(90deg, rgba(245,158,11,0.14), rgba(99,102,241,0.06));
+}
+.fv-row.has-note:hover {
+  background: linear-gradient(90deg, rgba(245,158,11,0.20), rgba(99,102,241,0.10));
+}
 
 /* Left border accent by change type */
 .fv-row-maintained { border-left: 3px solid var(--accent-emerald); }
@@ -235,6 +262,19 @@
 .st-candidate { background: rgba(99,102,241,0.12); color: var(--accent-indigo); }
 .st-rejected { background: rgba(244,63,94,0.15); color: var(--accent-rose); }
 .st-deferred { background: rgba(139,92,246,0.12); color: var(--accent-violet); }
+.fv-row-note-badge {
+  display: block;
+  width: fit-content;
+  margin: 5px auto 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.20);
+  border: 1px solid rgba(245,158,11,0.34);
+  color: var(--accent-amber);
+  font-size: 0.66rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
 
 /* Type tags (compact) */
 .fv-type-tag {

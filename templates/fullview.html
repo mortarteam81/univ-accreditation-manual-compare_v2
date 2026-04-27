@@ -114,7 +114,7 @@ async function loadFullView(section) {
   // Build criterion nav
   const nav = document.getElementById('criterion-nav');
   nav.innerHTML = data.map(g =>
-    `<a href="#cr-${g.criterion}" class="nav-chip" title="${g.title}">${g.criterion}</a>`
+    `<a href="#cr-${g.criterion}" class="nav-chip${g.note_count > 0 ? ' has-note' : ''}" title="${g.title}${g.note_count > 0 ? ` · 메모 ${g.note_count}건` : ''}">${g.criterion}</a>`
   ).join('');
 
   // Build content
@@ -125,12 +125,13 @@ async function loadFullView(section) {
     const pct = total > 0 ? (confirmed / total * 100).toFixed(0) : 0;
 
     html += `
-    <div class="criterion-block" id="cr-${g.criterion}">
+    <div class="criterion-block${g.note_count > 0 ? ' has-note' : ''}" id="cr-${g.criterion}">
       <div class="cb-header" onclick="toggleBlock(this)">
         <div class="cb-left">
           <span class="cb-id">${g.criterion}</span>
           <span class="cb-title">${g.title}</span>
           <span class="cb-count">${total}건</span>
+          ${g.note_count > 0 ? `<span class="fv-note-badge">메모 ${g.note_count}건</span>` : ''}
         </div>
         <div class="cb-right">
           <div class="cb-progress-bar"><div class="cb-progress-fill" style="width:${pct}%"></div></div>
@@ -156,10 +157,11 @@ async function loadFullView(section) {
       const sim = item.similarity ? `${(item.similarity * 100).toFixed(0)}%` : '—';
       const simCls = item.similarity >= 0.8 ? 'sim-high' : item.similarity >= 0.5 ? 'sim-mid' : 'sim-low';
       const typeCls = changeTypeCls(item.change_type);
+      const noteCount = Number(item.note_count || 0);
 
       html += `
-            <tr class="fv-row fv-row-${typeCls}" id="row-${item.change_id}">
-              <td class="td-status">${statusBadge(item.verification_status)}</td>
+            <tr class="fv-row fv-row-${typeCls}${noteCount > 0 ? ' has-note' : ''}" id="row-${item.change_id}">
+              <td class="td-status">${statusBadge(item.verification_status)}${noteCount > 0 ? `<span class="fv-row-note-badge">메모 ${noteCount}</span>` : ''}</td>
               <td class="td-type"><span class="fv-type-tag type-${typeCls}">${item.change_type}</span></td>
               <td class="td-text td-text-3">${item.source_text_3 || '<em class="empty">해당 없음</em>'}</td>
               <td class="td-sim ${simCls}">${sim}</td>

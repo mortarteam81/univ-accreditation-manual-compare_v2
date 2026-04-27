@@ -164,13 +164,15 @@ function truncate(s, n=80) {
 
 function renderRow(d, i) {
   const sim = d.similarity ? `${(d.similarity * 100).toFixed(0)}%` : '—';
+  const noteCount = Number(d.note_count || 0);
   return `
-  <div class="change-row animate-in" style="animation-delay:${i*0.02}s" onclick="openDetail('${d.change_id}')">
+  <div class="change-row animate-in${noteCount > 0 ? ' has-note' : ''}" style="animation-delay:${i*0.02}s" onclick="openDetail('${d.change_id}')">
     <div class="row-left">
       <span class="change-id">${d.change_id}</span>
       <span class="change-type-tag tag-${changeTypeCls(d.change_type)}">${d.change_type}</span>
       <span class="section-tag">${d.section_type}</span>
       ${statusBadge(d.verification_status)}
+      ${noteCount > 0 ? `<span class="note-badge">메모 ${noteCount}</span>` : ''}
     </div>
     <div class="row-texts">
       <div class="row-text-3" title="${(d.source_text_3||'').replace(/"/g,'&quot;')}">${truncate(d.source_text_3, 90)}</div>
@@ -329,6 +331,7 @@ async function addNote(changeId) {
     noteEl.value = '';
     showToast('메모 저장 완료');
     openDetail(changeId);
+    loadChanges();
   }
 }
 

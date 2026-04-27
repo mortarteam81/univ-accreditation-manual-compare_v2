@@ -303,11 +303,23 @@ body::before {
   cursor: default;
 }
 
+.criterion-card.has-note {
+  background: linear-gradient(135deg, rgba(99,102,241,0.22), rgba(245,158,11,0.10)), var(--bg-card);
+  border-color: rgba(245,158,11,0.42);
+  box-shadow: inset 3px 0 0 var(--accent-amber), 0 16px 34px rgba(245,158,11,0.10);
+}
+
 .criterion-card:hover {
   background: var(--bg-card-hover);
   border-color: var(--border-highlight);
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
+}
+
+.criterion-card.has-note:hover {
+  background: linear-gradient(135deg, rgba(99,102,241,0.28), rgba(245,158,11,0.15)), var(--bg-card-hover);
+  border-color: rgba(245,158,11,0.58);
+  box-shadow: inset 3px 0 0 var(--accent-amber), var(--shadow-md);
 }
 
 .criterion-header {
@@ -343,6 +355,20 @@ body::before {
   margin-bottom: 14px;
   line-height: 1.4;
   min-height: 2.8em;
+}
+
+.criterion-note-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 3px 9px;
+  margin: -3px 0 10px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.20);
+  border: 1px solid rgba(245,158,11,0.34);
+  color: var(--accent-amber);
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 /* Progress bar */
@@ -409,6 +435,10 @@ body::before {
   height: 8px;
   border-radius: 2px;
   flex-shrink: 0;
+}
+.legend-dot.note-dot {
+  background: var(--accent-amber);
+  box-shadow: 0 0 0 4px rgba(245,158,11,0.16);
 }
 
 .legend-count {

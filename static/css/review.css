@@ -84,10 +84,19 @@
   cursor: pointer;
   transition: all var(--transition-fast);
 }
+.change-row.has-note {
+  background: linear-gradient(135deg, rgba(99,102,241,0.20), rgba(245,158,11,0.10)), var(--bg-glass);
+  border-color: rgba(245,158,11,0.42);
+  box-shadow: inset 3px 0 0 var(--accent-amber);
+}
 .change-row:hover {
   background: var(--bg-card-hover);
   border-color: var(--border-highlight);
   transform: translateX(4px);
+}
+.change-row.has-note:hover {
+  background: linear-gradient(135deg, rgba(99,102,241,0.26), rgba(245,158,11,0.14)), var(--bg-card-hover);
+  border-color: rgba(245,158,11,0.58);
 }
 .row-left {
   display: flex;
@@ -123,6 +132,17 @@
 }
 .badge-rejected { background: rgba(244,63,94,0.1); border-color: rgba(244,63,94,0.3); color: var(--accent-rose); }
 .badge-deferred { background: rgba(139,92,246,0.1); border-color: rgba(139,92,246,0.3); color: var(--accent-violet); }
+.note-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(245,158,11,0.20);
+  border: 1px solid rgba(245,158,11,0.34);
+  color: var(--accent-amber);
+  font-size: 0.7rem;
+  font-weight: 800;
+}
 
 .row-texts {
   display: grid;
