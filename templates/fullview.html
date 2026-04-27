@@ -40,6 +40,16 @@
   <!-- CRITERION NAV (sticky) -->
   <div class="criterion-nav" id="criterion-nav"></div>
 
+  <!-- ACTION LEGEND -->
+  <div class="action-legend animate-in" aria-label="액션 아이콘 설명">
+    <span class="legend-title">액션</span>
+    <span class="legend-item"><span class="legend-icon legend-confirm">✓</span> 확정</span>
+    <span class="legend-item"><span class="legend-icon legend-reject">✗</span> 반려</span>
+    <span class="legend-item"><span class="legend-icon legend-defer">⏸</span> 보류</span>
+    <span class="legend-item"><span class="legend-icon legend-detail">⋯</span> 상세 검토</span>
+    <span class="legend-note">확정/반려/보류는 즉시 저장되고 저장 결과를 다시 확인합니다.</span>
+  </div>
+
   <!-- MAIN CONTENT -->
   <div id="fullview-content">
     <div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>
@@ -156,10 +166,10 @@ async function loadFullView(section) {
               <td class="td-text td-text-4">${item.source_text_4 || '<em class="empty">해당 없음</em>'}</td>
               <td class="td-action">
                 <div class="inline-actions">
-                  <button class="ia-btn ia-confirm" title="확정" onclick="quickAction('${item.change_id}','confirmed',this)">✓</button>
-                  <button class="ia-btn ia-reject" title="반려" onclick="quickAction('${item.change_id}','rejected',this)">✗</button>
-                  <button class="ia-btn ia-defer" title="보류" onclick="quickAction('${item.change_id}','deferred',this)">⏸</button>
-                  <button class="ia-btn ia-detail" title="상세" onclick="window.open('/review?criterion=${g.criterion}','_blank')">⋯</button>
+                  <button class="ia-btn ia-confirm" title="확정으로 저장" aria-label="확정으로 저장" onclick="quickAction('${item.change_id}','confirmed',this)"><span>✓</span><span class="ia-label">확정</span></button>
+                  <button class="ia-btn ia-reject" title="반려로 저장" aria-label="반려로 저장" onclick="quickAction('${item.change_id}','rejected',this)"><span>✗</span><span class="ia-label">반려</span></button>
+                  <button class="ia-btn ia-defer" title="보류로 저장" aria-label="보류로 저장" onclick="quickAction('${item.change_id}','deferred',this)"><span>⏸</span><span class="ia-label">보류</span></button>
+                  <button class="ia-btn ia-detail" title="상세 검토 열기" aria-label="상세 검토 열기" onclick="window.open('/review?criterion=${g.criterion}','_blank')"><span>⋯</span><span class="ia-label">상세</span></button>
                 </div>
               </td>
             </tr>`;
@@ -184,32 +194,54 @@ function toggleBlock(header) {
 
 async function quickAction(changeId, status, btn) {
   const row = document.getElementById(`row-${changeId}`);
+  const originalText = btn.innerHTML;
   btn.disabled = true;
+  btn.innerHTML = '<span class="ia-saving">저장 중</span>';
 
-  const res = await fetch(`/api/change/${changeId}/status`, {
-    method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({status})
-  });
-  const d = await res.json();
+  try {
+    const res = await fetch(`/api/change/${changeId}/status`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status})
+    });
+    const d = await res.json();
 
-  if (d.ok) {
-    // Update status badge in-place
+    if (!res.ok || !d.ok) {
+      showToast(`저장 실패: ${d.error || res.statusText}`, true);
+      return;
+    }
+
+    const savedStatus = d.saved?.verification_status;
+    if (savedStatus !== status) {
+      showToast(`저장 확인 실패: 요청 ${status}, 저장 ${savedStatus || '없음'}`, true);
+      return;
+    }
+
+    // Update status badge in-place after persistence is verified.
     const statusCell = row.querySelector('.td-status');
-    statusCell.innerHTML = statusBadge(status);
+    statusCell.innerHTML = statusBadge(savedStatus);
 
     // Flash effect
-    row.classList.add('flash-' + (status === 'confirmed' ? 'green' : status === 'rejected' ? 'red' : 'purple'));
+    row.classList.add('flash-' + (savedStatus === 'confirmed' ? 'green' : savedStatus === 'rejected' ? 'red' : 'purple'));
     setTimeout(() => row.classList.remove('flash-green','flash-red','flash-purple'), 800);
 
-    showToast(`${changeId}: ${status}`);
+    showToast(`${changeId}: ${statusBadgeText(savedStatus)} 저장됨`);
+  } catch (error) {
+    showToast(`저장 실패: ${error.message}`, true);
+  } finally {
+    btn.innerHTML = originalText;
+    btn.disabled = false;
   }
-  btn.disabled = false;
 }
 
-function showToast(msg) {
+function statusBadgeText(status) {
+  const labels = {confirmed: '확정', rejected: '반려', deferred: '보류', needs_review: '검토필요', candidate: '후보'};
+  return labels[status] || status;
+}
+
+function showToast(msg, isError = false) {
   const t = document.createElement('div');
-  t.className = 'fv-toast';
+  t.className = `fv-toast${isError ? ' error' : ''}`;
   t.textContent = msg;
   document.body.appendChild(t);
   requestAnimationFrame(() => t.classList.add('show'));

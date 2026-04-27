@@ -358,7 +358,7 @@ def api_risk_heatmap():
 @app.route("/api/change/<change_id>/status", methods=["PATCH"])
 def api_update_status(change_id):
     """변경사항의 검토 상태를 업데이트"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_status = data.get("status")  # confirmed / needs_review / rejected
     note = data.get("note", "")
     reviewer = data.get("reviewer", "user")
@@ -396,15 +396,28 @@ def api_update_status(change_id):
     """, (new_status, review_status_map[new_status], change_id))
 
     # 로그 기록
-    conn.execute("""
+    log_cursor = conn.execute("""
         INSERT INTO review_log (change_id, action, old_status, new_status, note, reviewer, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (change_id, "status_change", old_status, new_status, note, reviewer, now))
 
     conn.commit()
+
+    saved = conn.execute("""
+        SELECT change_id, verification_status, human_review_status
+        FROM change_atom
+        WHERE change_id = ?
+    """, (change_id,)).fetchone()
     conn.close()
 
-    return jsonify({"ok": True, "change_id": change_id, "new_status": new_status})
+    return jsonify({
+        "ok": True,
+        "change_id": change_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "review_log_id": log_cursor.lastrowid,
+        "saved": dict(saved) if saved else None,
+    })
 
 
 @app.route("/api/change/<change_id>/note", methods=["POST"])
