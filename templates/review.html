@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>검토 인터페이스 — 인증평가 편람 비교분석</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -29,6 +30,10 @@
 
   <!-- FILTER BAR -->
   <div class="filter-bar animate-in" id="filter-bar">
+    <div class="filter-group filter-search">
+      <label>검색</label>
+      <input id="f-q" type="search" placeholder="항목 ID, 원문, 부서, 검토사유">
+    </div>
     <div class="filter-group">
       <label>준거</label>
       <select id="f-criterion"><option value="">전체</option></select>
@@ -57,16 +62,25 @@
       </select>
     </div>
     <div class="filter-group">
-      <label>검증상태</label>
-      <select id="f-status">
-        <option value="">전체</option>
-        <option value="confirmed">확정</option>
-        <option value="needs_review">검토필요</option>
-        <option value="candidate">후보</option>
-        <option value="rejected">반려</option>
+      <label>정렬</label>
+      <select id="f-sort">
+        <option value="priority">검토 우선순위</option>
+        <option value="high_risk">고위험 우선</option>
+        <option value="candidate">후보 우선</option>
+        <option value="status">상태별 묶기</option>
+        <option value="similarity_low">유사도 낮은 순</option>
+        <option value="criterion">준거순</option>
       </select>
     </div>
+    <label class="filter-toggle">
+      <input type="checkbox" id="f-note">
+      <span>메모 있음</span>
+    </label>
     <button class="btn-filter" onclick="loadChanges()">🔍 조회</button>
+    <div class="status-filter-group" aria-label="검증상태 필터">
+      <span class="status-filter-label">상태</span>
+      <div class="status-menu" id="status-menu"></div>
+    </div>
   </div>
 
   <!-- CHANGE LIST -->
@@ -88,11 +102,28 @@
 
 <script>
 const API = path => fetch(path).then(r => r.json());
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const canManageReview = {{ 'true' if current_user() and current_user().role == 'admin' else 'false' }};
+const DIFF_TOKEN_LIMIT = 260;
+const STATUS_OPTIONS = [
+  {value: '', label: '전체'},
+  {value: 'needs_review', label: '검토필요'},
+  {value: 'candidate', label: '후보'},
+  {value: 'confirmed', label: '확정'},
+  {value: 'rejected', label: '반려'},
+  {value: 'deferred', label: '보류'}
+];
+let activeStatus = '';
 
 // ── Init: load criteria list ──
 async function init() {
   const params = new URLSearchParams(location.search);
   const crit = params.get('criterion') || '';
+  const sec = params.get('section') || '';
+  const status = params.get('status') || '';
+  const sort = params.get('sort') || 'priority';
+  const q = params.get('q') || '';
+  const hasNote = params.get('has_note') === '1';
 
   const list = await API('/api/criteria-list');
   const sel = document.getElementById('f-criterion');
@@ -103,31 +134,81 @@ async function init() {
     if (c.cycle4_criterion === crit) o.selected = true;
     sel.appendChild(o);
   });
-  if (crit) loadChanges();
+  if (sec) document.getElementById('f-section').value = sec;
+  if (STATUS_OPTIONS.some(opt => opt.value === status)) activeStatus = status;
+  if (document.querySelector(`#f-sort option[value="${sort}"]`)) document.getElementById('f-sort').value = sort;
+  document.getElementById('f-q').value = q;
+  document.getElementById('f-note').checked = hasNote;
+  renderStatusMenu();
+  wireFilters();
+  loadChanges();
 }
 
-// ── Load changes ──
-async function loadChanges() {
+function wireFilters() {
+  ['f-criterion', 'f-section', 'f-type', 'f-sort', 'f-note'].forEach(id => {
+    document.getElementById(id).addEventListener('change', loadChanges);
+  });
+  document.getElementById('f-q').addEventListener('keydown', e => {
+    if (e.key === 'Enter') loadChanges();
+  });
+}
+
+function buildChangeQuery(includeStatus=true) {
   const c = document.getElementById('f-criterion').value;
   const s = document.getElementById('f-section').value;
   const t = document.getElementById('f-type').value;
-  const st = document.getElementById('f-status').value;
+  const sort = document.getElementById('f-sort').value;
+  const qText = document.getElementById('f-q').value.trim();
+  const hasNote = document.getElementById('f-note').checked;
 
   const q = new URLSearchParams();
   if (c) q.set('criterion', c);
   if (s) q.set('section', s);
   if (t) q.set('change_type', t);
-  if (st) q.set('status', st);
+  if (qText) q.set('q', qText);
+  if (hasNote) q.set('has_note', '1');
+  if (includeStatus && activeStatus) q.set('status', activeStatus);
+  if (includeStatus && sort) q.set('sort', sort);
+  return q;
+}
 
+function renderStatusMenu(counts={}) {
+  const total = STATUS_OPTIONS.slice(1).reduce((sum, opt) => sum + Number(counts[opt.value] || 0), 0);
+  const menu = document.getElementById('status-menu');
+  menu.innerHTML = STATUS_OPTIONS.map(opt => {
+    const count = opt.value ? Number(counts[opt.value] || 0) : total;
+    const active = opt.value === activeStatus ? ' active' : '';
+    return `<button type="button" class="status-chip${active}" data-status="${opt.value}" onclick="setStatusFilter('${opt.value}')">
+      <span>${opt.label}</span><strong>${count}</strong>
+    </button>`;
+  }).join('');
+}
+
+async function loadStatusSummary() {
+  const counts = await API(`/api/change-status-summary?${buildChangeQuery(false)}`);
+  renderStatusMenu(counts);
+}
+
+function setStatusFilter(status) {
+  activeStatus = status;
+  loadChanges();
+}
+
+// ── Load changes ──
+async function loadChanges() {
   const container = document.getElementById('change-list');
   container.innerHTML = '<div class="loading"><div class="spinner"></div>로딩 중...</div>';
 
+  await loadStatusSummary();
+  const q = buildChangeQuery(true);
   const data = await API(`/api/changes?${q}`);
   document.getElementById('review-count').textContent = `${data.length}건`;
 
   const selOpt = document.getElementById('f-criterion');
   const label = selOpt.options[selOpt.selectedIndex]?.textContent || '전체';
-  document.getElementById('page-subtitle').textContent = `${label} — ${data.length}건`;
+  const statusLabel = STATUS_OPTIONS.find(opt => opt.value === activeStatus)?.label || '전체';
+  const sortLabel = document.getElementById('f-sort').selectedOptions[0]?.textContent || '준거순';
+  document.getElementById('page-subtitle').textContent = `${label} · ${statusLabel} · ${sortLabel} — ${data.length}건`;
 
   if (!data.length) {
     container.innerHTML = '<div class="empty-state">조건에 맞는 변경사항이 없습니다.</div>';
@@ -149,6 +230,32 @@ function statusBadge(s) {
   return `<span class="status-badge ${c}">${l}</span>`;
 }
 
+function riskBadge(d) {
+  const rank = Number(d.risk_rank || 0);
+  if (rank >= 3) return `<span class="risk-mini risk-high">고위험 ${Number(d.high_risk_count || 0)}</span>`;
+  if (rank >= 2) return `<span class="risk-mini risk-medium">중위험 ${Number(d.medium_risk_count || 0)}</span>`;
+  return '';
+}
+
+function deptBadge(d) {
+  if (!d.primary_departments) return '';
+  const label = d.primary_departments.split(',').slice(0, 2).join(', ');
+  return `<span class="dept-mini" title="${d.primary_departments.replace(/"/g,'&quot;')}">${label}</span>`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll('\n', ' ');
+}
+
 function simColor(v) {
   if (!v && v !== 0) return '';
   const n = parseFloat(v);
@@ -159,7 +266,92 @@ function simColor(v) {
 
 function truncate(s, n=80) {
   if (!s) return '<span class="text-empty">—</span>';
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  const text = s.length > n ? s.slice(0, n) + '…' : s;
+  return escapeHtml(text);
+}
+
+function tokenizeDiffText(value) {
+  return String(value || '').match(/\s+|[가-힣]+|[A-Za-z0-9]+|[^\s가-힣A-Za-z0-9]/g) || [];
+}
+
+function buildDiffOps(left, right) {
+  const a = tokenizeDiffText(left);
+  const b = tokenizeDiffText(right);
+  if (a.length + b.length > DIFF_TOKEN_LIMIT) {
+    return null;
+  }
+
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp = Array.from({ length: rows }, () => Array(cols).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      ops.push(['same', a[i]]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push(['del', a[i]]);
+      i++;
+    } else {
+      ops.push(['add', b[j]]);
+      j++;
+    }
+  }
+  while (i < a.length) ops.push(['del', a[i++]]);
+  while (j < b.length) ops.push(['add', b[j++]]);
+  return ops;
+}
+
+function compactDiffSpans(parts) {
+  const compacted = [];
+  parts.forEach(part => {
+    if (!part[1]) return;
+    const last = compacted[compacted.length - 1];
+    if (last && last[0] === part[0]) {
+      last[1] += part[1];
+    } else {
+      compacted.push([part[0], part[1]]);
+    }
+  });
+  return compacted.map(([kind, text]) => {
+    const cls = kind === 'same' ? 'diff-same' : kind === 'del' ? 'diff-del' : 'diff-add';
+    return `<span class="${cls}">${escapeHtml(text)}</span>`;
+  }).join('');
+}
+
+function diffHtmlForSide(left, right, side, similarity) {
+  if (!left && !right) return '<span class="text-empty">—</span>';
+  if (!left && side === 'right') return `<span class="diff-add">${escapeHtml(right)}</span>`;
+  if (!right && side === 'left') return `<span class="diff-del">${escapeHtml(left)}</span>`;
+  if (!left) return '<span class="text-empty">해당 항목 없음 (신설 항목)</span>';
+  if (!right) return '<span class="text-empty">해당 항목 없음 (삭제/이동 항목)</span>';
+
+  const ops = buildDiffOps(left, right);
+  if (!ops) {
+    return `<span class="diff-too-large">원문이 길어 차이 강조를 생략했습니다.</span>${escapeHtml(side === 'left' ? left : right)}`;
+  }
+
+  const shown = ops
+    .filter(([kind]) => side === 'left' ? kind !== 'add' : kind !== 'del')
+    .map(([kind, text]) => {
+      if (side === 'left' && kind === 'del') return ['del', text];
+      if (side === 'right' && kind === 'add') return ['add', text];
+      return ['same', text];
+    });
+  const html = compactDiffSpans(shown);
+  const lowSim = Number(similarity || 0) > 0 && Number(similarity || 0) < 0.45
+    ? '<span class="diff-too-large">유사도가 낮아 전체 재검토가 필요합니다.</span>'
+    : '';
+  return lowSim + html;
 }
 
 function renderRow(d, i) {
@@ -172,12 +364,14 @@ function renderRow(d, i) {
       <span class="change-type-tag tag-${changeTypeCls(d.change_type)}">${d.change_type}</span>
       <span class="section-tag">${d.section_type}</span>
       ${statusBadge(d.verification_status)}
+      ${riskBadge(d)}
+      ${deptBadge(d)}
       ${noteCount > 0 ? `<span class="note-badge">메모 ${noteCount}</span>` : ''}
     </div>
     <div class="row-texts">
-      <div class="row-text-3" title="${(d.source_text_3||'').replace(/"/g,'&quot;')}">${truncate(d.source_text_3, 90)}</div>
+      <div class="row-text-3" title="${escapeAttr(d.source_text_3 || '')}">${truncate(d.source_text_3, 90)}</div>
       <span class="row-arrow ${simColor(d.similarity)}">${sim}</span>
-      <div class="row-text-4" title="${(d.source_text_4||'').replace(/"/g,'&quot;')}">${truncate(d.source_text_4, 90)}</div>
+      <div class="row-text-4" title="${escapeAttr(d.source_text_4 || '')}">${truncate(d.source_text_4, 90)}</div>
     </div>
   </div>`;
 }
@@ -223,11 +417,16 @@ async function openDetail(changeId) {
   let historyHtml = '';
   if (history.length) {
     historyHtml = `<div class="detail-section"><h4>📜 검토 이력</h4><div class="history-list">` +
-      history.map(h => `<div class="history-item">
+      history.map(h => {
+        const actor = h.actor_email || h.reviewer || 'user';
+        const actionLabel = h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : (h.action === 'department_note' ? '부서 의견' : '메모');
+        return `<div class="history-item">
         <span class="history-time">${h.created_at?.slice(0,16).replace('T',' ')}</span>
-        <span class="history-action">${h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : '메모'}</span>
+        <span class="history-action">${actionLabel}</span>
+        <span class="history-actor">${actor}</span>
         ${h.note ? `<span class="history-note">${h.note}</span>` : ''}
-      </div>`).join('') + '</div></div>';
+      </div>`;
+      }).join('') + '</div></div>';
   }
 
   document.getElementById('modal-body').innerHTML = `
@@ -244,7 +443,7 @@ async function openDetail(changeId) {
     <div class="compare-container">
       <div class="compare-col compare-3">
         <div class="compare-label">3주기 <span class="compare-criterion">${c.cycle3_criterion || '—'} ${c.cycle3_title || ''}</span></div>
-        <div class="compare-text">${c.source_text_3 || '<span class="text-empty">해당 항목 없음 (신설 항목)</span>'}</div>
+        <div class="compare-text diff-text">${diffHtmlForSide(c.source_text_3, c.source_text_4, 'left', c.similarity)}</div>
         <div class="compare-id">${c.source_id_3 || ''}</div>
       </div>
       <div class="compare-arrow">
@@ -253,7 +452,7 @@ async function openDetail(changeId) {
       </div>
       <div class="compare-col compare-4">
         <div class="compare-label">4주기 <span class="compare-criterion">${c.cycle4_criterion} ${c.cycle4_title}</span></div>
-        <div class="compare-text">${c.source_text_4 || '<span class="text-empty">해당 항목 없음 (삭제/이동 항목)</span>'}</div>
+        <div class="compare-text diff-text">${diffHtmlForSide(c.source_text_3, c.source_text_4, 'right', c.similarity)}</div>
         <div class="compare-id">${c.source_id_4 || ''}</div>
       </div>
     </div>
@@ -261,6 +460,7 @@ async function openDetail(changeId) {
     ${matchHtml}
     ${actHtml}
 
+    ${canManageReview ? `
     <div class="detail-section">
       <h4>🏢 담당부서 배정 <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(복수 선택 가능)</span></h4>
       <div class="dept-checkboxes" id="dept-cb-${c.change_id}">
@@ -271,17 +471,20 @@ async function openDetail(changeId) {
       </div>
       <button class="btn-note" style="margin-top:8px" onclick="saveDepts('${c.change_id}')">💾 부서 배정 저장</button>
     </div>
+    ` : ''}
 
     <div class="detail-section">
-      <h4>✏️ 검토 액션</h4>
+      <h4>${canManageReview ? '✏️ 검토 액션' : '💬 부서 의견'}</h4>
+      ${canManageReview ? `
       <div class="review-actions" id="review-actions-${c.change_id}">
         <button class="btn-action btn-confirm" onclick="setStatus('${c.change_id}','confirmed')">✅ 확정</button>
         <button class="btn-action btn-reject" onclick="setStatus('${c.change_id}','rejected')">❌ 반려</button>
         <button class="btn-action btn-defer" onclick="setStatus('${c.change_id}','deferred')">⏸ 보류</button>
         <button class="btn-action btn-reset" onclick="setStatus('${c.change_id}','needs_review')">🔄 검토필요로 복원</button>
       </div>
+      ` : ''}
       <div class="note-input-group">
-        <textarea id="note-input-${c.change_id}" placeholder="검토 메모를 입력하세요..." rows="2"></textarea>
+        <textarea id="note-input-${c.change_id}" placeholder="${canManageReview ? '검토 메모를 입력하세요...' : '부서 의견이나 확인 내용을 입력하세요...'}" rows="2"></textarea>
         <button class="btn-note" onclick="addNote('${c.change_id}')">💬 메모 저장</button>
       </div>
     </div>
@@ -303,7 +506,7 @@ async function setStatus(changeId, status) {
 
   const res = await fetch(`/api/change/${changeId}/status`, {
     method: 'PATCH',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
     body: JSON.stringify({status, note})
   });
   const d = await res.json();
@@ -323,7 +526,7 @@ async function addNote(changeId) {
 
   const res = await fetch(`/api/change/${changeId}/note`, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
     body: JSON.stringify({note})
   });
   const d = await res.json();
@@ -340,7 +543,7 @@ async function saveDepts(changeId) {
   const checked = [...container.querySelectorAll('input:checked')].map(cb => parseInt(cb.value));
   const res = await fetch(`/api/change/${changeId}/departments`, {
     method: 'PUT',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
     body: JSON.stringify({dept_ids: checked})
   });
   const d = await res.json();

@@ -247,6 +247,37 @@
 .td-text { line-height: 1.65; word-break: keep-all; color: var(--text-primary); }
 .td-text-3 { color: var(--text-secondary); }
 .td-text em.empty { color: var(--text-muted); font-style: italic; font-size: 0.8rem; }
+.diff-text { color: var(--text-secondary); }
+.diff-same { color: var(--text-secondary); }
+.diff-del,
+.diff-add {
+  display: inline;
+  padding: 1px 3px;
+  border-radius: 4px;
+  font-weight: 700;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.diff-del {
+  color: #fecdd3;
+  background: rgba(244,63,94,0.17);
+  border-bottom: 1px solid rgba(244,63,94,0.55);
+}
+.diff-add {
+  color: #bbf7d0;
+  background: rgba(16,185,129,0.18);
+  border-bottom: 1px solid rgba(16,185,129,0.55);
+}
+.diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.diff-toggle input { accent-color: var(--accent-indigo); }
 
 /* Status badges (compact) */
 .fv-status {

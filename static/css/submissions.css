@@ -103,6 +103,29 @@
   background: var(--gradient-primary);
   padding: 10px 16px;
 }
+.login-oauth {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  margin-bottom: 8px;
+}
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0 14px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-glass);
+}
 .portal-button.secondary {
   display: inline-flex;
   align-items: center;

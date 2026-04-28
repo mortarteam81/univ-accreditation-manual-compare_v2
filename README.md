@@ -30,7 +30,29 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. 실행
+### 3. 인증 환경변수
+
+기본 인증은 Google OIDC입니다. 운영/공유 환경에서는 아래 값을 설정하세요.
+
+```bash
+export FLASK_SECRET_KEY="change-to-a-long-random-secret"
+export OIDC_CLIENT_ID="google-oauth-client-id"
+export OIDC_CLIENT_SECRET="google-oauth-client-secret"
+export OIDC_SERVER_METADATA_URL="https://accounts.google.com/.well-known/openid-configuration"
+export OIDC_REDIRECT_URI="http://localhost:5001/auth/oidc/callback"
+export INITIAL_ADMIN_EMAILS="admin@example.com"
+```
+
+선택적으로 `AUTH_USER_SEED_PATH`에 CSV 경로를 지정하면 사용자 allowlist를 시딩할 수 있습니다.
+CSV 컬럼은 `email,display_name,role,department,is_active`를 사용합니다.
+
+로컬 개발에서만 기존 비밀번호 로그인을 쓰려면 명시적으로 켭니다.
+
+```bash
+export DEV_AUTH_ENABLED=1
+```
+
+### 4. 실행
 
 > ⚠️ 이 프로젝트는 Streamlit이 아니라 **Flask** 입니다.
 
@@ -41,9 +63,9 @@ python app.py
 실행 후:
 - http://localhost:5000 접속
 
-### 4. 개발용 로그인 계정
+### 5. 개발용 로그인 계정
 
-`app.py` 실행 시 내부 MVP용 계정이 자동 시딩됩니다. 운영 전에는 반드시 비밀번호를 변경하거나 SSO로 전환하세요.
+`DEV_AUTH_ENABLED=1`일 때만 내부 MVP용 계정으로 로그인할 수 있습니다. 운영에서는 Google OIDC와 `users` allowlist를 사용하세요.
 
 | 역할 | 이메일 | 기본 비밀번호 |
 |---|---|---|
@@ -51,6 +73,8 @@ python app.py
 | 부서 담당자 예시 | `acad@local.accreditation` | `dept1234` |
 
 부서 계정은 부서 마스터 코드 기준으로 생성됩니다. 예: `plan@local.accreditation`, `stud@local.accreditation`, `libr@local.accreditation`.
+
+모든 페이지와 API는 로그인 후 접근합니다. 관리자는 전체 데이터를 조회/변경할 수 있고, 부서 담당자는 자기 부서와 관련된 편람 비교 항목 및 제출 항목만 조회합니다. 편람 비교의 확정/반려/보류는 관리자만 가능하며, 부서 담당자는 관련 항목에 부서 의견 메모를 남길 수 있습니다.
 
 ---
 
@@ -111,8 +135,9 @@ $env:AI_MODEL="gemma-2-9b-it"
 ### 검토 워크플로우
 - `PATCH /api/change/<change_id>/status` : 검토 상태 업데이트
   - `status`: `confirmed | needs_review | rejected | deferred`
-  - `note`, `reviewer` 지원
+  - 관리자 전용, `X-CSRF-Token` 필요
 - `POST /api/change/<change_id>/note` : 검토 메모 추가
+  - 관리자는 일반 메모(`note`), 부서 담당자는 부서 의견(`department_note`)으로 감사로그에 저장
 - `GET /api/change/<change_id>/history` : 검토 이력 조회 (`review_log`)
 
 ### 부서 배정

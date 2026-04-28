@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>전체 비교 — 인증평가 편람</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -47,6 +48,7 @@
     <span class="legend-item"><span class="legend-icon legend-reject">✗</span> 반려</span>
     <span class="legend-item"><span class="legend-icon legend-defer">⏸</span> 보류</span>
     <span class="legend-item"><span class="legend-icon legend-detail">⋯</span> 상세 검토</span>
+    <label class="diff-toggle"><input type="checkbox" id="diff-toggle" checked onchange="loadFullView(currentSection)"> 차이 강조</label>
     <span class="legend-note">확정/반려/보류는 즉시 저장되고 저장 결과를 다시 확인합니다.</span>
   </div>
 
@@ -60,6 +62,9 @@
 <!-- Action toast -->
 <script>
 const API = path => fetch(path).then(r => r.json());
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const canManageReview = {{ 'true' if current_user() and current_user().role == 'admin' else 'false' }};
+const DIFF_TOKEN_LIMIT = 220;
 let currentSection = 'overview';
 
 const sectionNames = {
@@ -100,11 +105,94 @@ function statusBadge(s) {
   return `<span class="fv-status ${c}">${l}</span>`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function tokenizeDiffText(value) {
+  return String(value || '').match(/\s+|[가-힣]+|[A-Za-z0-9]+|[^\s가-힣A-Za-z0-9]/g) || [];
+}
+
+function buildDiffOps(left, right) {
+  const a = tokenizeDiffText(left);
+  const b = tokenizeDiffText(right);
+  if (a.length + b.length > DIFF_TOKEN_LIMIT) return null;
+  const dp = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      ops.push(['same', a[i++]]);
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push(['del', a[i++]]);
+    } else {
+      ops.push(['add', b[j++]]);
+    }
+  }
+  while (i < a.length) ops.push(['del', a[i++]]);
+  while (j < b.length) ops.push(['add', b[j++]]);
+  return ops;
+}
+
+function compactDiffSpans(parts) {
+  const compacted = [];
+  parts.forEach(part => {
+    if (!part[1]) return;
+    const last = compacted[compacted.length - 1];
+    if (last && last[0] === part[0]) last[1] += part[1];
+    else compacted.push([part[0], part[1]]);
+  });
+  return compacted.map(([kind, text]) => {
+    const cls = kind === 'same' ? 'diff-same' : kind === 'del' ? 'diff-del' : 'diff-add';
+    return `<span class="${cls}">${escapeHtml(text)}</span>`;
+  }).join('');
+}
+
+function diffHtmlForSide(left, right, side) {
+  if (!left && !right) return '<em class="empty">해당 없음</em>';
+  if (!left && side === 'right') return `<span class="diff-add">${escapeHtml(right)}</span>`;
+  if (!right && side === 'left') return `<span class="diff-del">${escapeHtml(left)}</span>`;
+  if (!left) return '<em class="empty">해당 없음</em>';
+  if (!right) return '<em class="empty">해당 없음</em>';
+  const ops = buildDiffOps(left, right);
+  if (!ops) return escapeHtml(side === 'left' ? left : right);
+  const shown = ops
+    .filter(([kind]) => side === 'left' ? kind !== 'add' : kind !== 'del')
+    .map(([kind, text]) => {
+      if (side === 'left' && kind === 'del') return ['del', text];
+      if (side === 'right' && kind === 'add') return ['add', text];
+      return ['same', text];
+    });
+  return compactDiffSpans(shown);
+}
+
+function textCellHtml(item, side, diffEnabled) {
+  const left = item.source_text_3 || '';
+  const right = item.source_text_4 || '';
+  if (!diffEnabled) {
+    const plain = side === 'left' ? left : right;
+    return plain ? escapeHtml(plain) : '<em class="empty">해당 없음</em>';
+  }
+  return diffHtmlForSide(left, right, side);
+}
+
 async function loadFullView(section) {
   const container = document.getElementById('fullview-content');
   container.innerHTML = '<div class="loading"><div class="spinner"></div>데이터 로딩 중...</div>';
 
   const data = await API(`/api/fullview?section=${section}`);
+  const diffEnabled = document.getElementById('diff-toggle')?.checked ?? true;
 
   const totalItems = data.reduce((s, g) => s + g.items.length, 0);
   document.getElementById('total-count').textContent = `${totalItems}건`;
@@ -163,14 +251,16 @@ async function loadFullView(section) {
             <tr class="fv-row fv-row-${typeCls}${noteCount > 0 ? ' has-note' : ''}" id="row-${item.change_id}">
               <td class="td-status">${statusBadge(item.verification_status)}${noteCount > 0 ? `<span class="fv-row-note-badge">메모 ${noteCount}</span>` : ''}</td>
               <td class="td-type"><span class="fv-type-tag type-${typeCls}">${item.change_type}</span></td>
-              <td class="td-text td-text-3">${item.source_text_3 || '<em class="empty">해당 없음</em>'}</td>
+              <td class="td-text td-text-3${diffEnabled ? ' diff-text' : ''}">${textCellHtml(item, 'left', diffEnabled)}</td>
               <td class="td-sim ${simCls}">${sim}</td>
-              <td class="td-text td-text-4">${item.source_text_4 || '<em class="empty">해당 없음</em>'}</td>
+              <td class="td-text td-text-4${diffEnabled ? ' diff-text' : ''}">${textCellHtml(item, 'right', diffEnabled)}</td>
               <td class="td-action">
                 <div class="inline-actions">
-                  <button class="ia-btn ia-confirm" title="확정으로 저장" aria-label="확정으로 저장" onclick="quickAction('${item.change_id}','confirmed',this)"><span>✓</span><span class="ia-label">확정</span></button>
-                  <button class="ia-btn ia-reject" title="반려로 저장" aria-label="반려로 저장" onclick="quickAction('${item.change_id}','rejected',this)"><span>✗</span><span class="ia-label">반려</span></button>
-                  <button class="ia-btn ia-defer" title="보류로 저장" aria-label="보류로 저장" onclick="quickAction('${item.change_id}','deferred',this)"><span>⏸</span><span class="ia-label">보류</span></button>
+                  ${canManageReview ? `
+                    <button class="ia-btn ia-confirm" title="확정으로 저장" aria-label="확정으로 저장" onclick="quickAction('${item.change_id}','confirmed',this)"><span>✓</span><span class="ia-label">확정</span></button>
+                    <button class="ia-btn ia-reject" title="반려로 저장" aria-label="반려로 저장" onclick="quickAction('${item.change_id}','rejected',this)"><span>✗</span><span class="ia-label">반려</span></button>
+                    <button class="ia-btn ia-defer" title="보류로 저장" aria-label="보류로 저장" onclick="quickAction('${item.change_id}','deferred',this)"><span>⏸</span><span class="ia-label">보류</span></button>
+                  ` : ''}
                   <button class="ia-btn ia-detail" title="상세 검토 열기" aria-label="상세 검토 열기" onclick="window.open('/review?criterion=${g.criterion}','_blank')"><span>⋯</span><span class="ia-label">상세</span></button>
                 </div>
               </td>
@@ -203,7 +293,7 @@ async function quickAction(changeId, status, btn) {
   try {
     const res = await fetch(`/api/change/${changeId}/status`, {
       method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: JSON.stringify({status})
     });
     const d = await res.json();

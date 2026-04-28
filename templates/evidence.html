@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>증빙자료 관리 — 인증평가 편람</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -43,7 +44,9 @@
     </div>
     <button class="btn-primary" onclick="loadEvidence()">🔍 조회</button>
     <div style="flex:1"></div>
-    <button class="btn-accent" onclick="openAddModal()">＋ 증빙자료 등록</button>
+    {% if current_user() and current_user().role == 'admin' %}
+      <button class="btn-accent" onclick="openAddModal()">＋ 증빙자료 등록</button>
+    {% endif %}
   </div>
 
   <!-- SUMMARY BAR -->
@@ -104,6 +107,8 @@
 
 <script>
 const API = path => fetch(path).then(r => r.json());
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const canManageEvidence = {{ 'true' if current_user() and current_user().role == 'admin' else 'false' }};
 let criteriaList = [];
 
 async function init() {
@@ -156,7 +161,7 @@ async function loadEvidence() {
       </div>
       <table class="ev-table">
         <thead><tr>
-          <th>주기</th><th>관리번호</th><th>자료 제목</th><th>위치</th><th>재활용</th><th>비고</th><th>액션</th>
+          <th>주기</th><th>관리번호</th><th>자료 제목</th><th>위치</th><th>재활용</th><th>비고</th>${canManageEvidence ? '<th>액션</th>' : ''}
         </tr></thead>
         <tbody>`;
     items.forEach(d => {
@@ -168,10 +173,10 @@ async function loadEvidence() {
         <td class="td-loc">${d.doc_location || '—'}</td>
         <td class="td-reuse">${reuse}</td>
         <td class="td-notes">${d.notes || ''}</td>
-        <td class="td-actions">
+        ${canManageEvidence ? `<td class="td-actions">
           <button class="ev-btn-edit" onclick='editEvidence(${JSON.stringify(d)})'>✎</button>
           <button class="ev-btn-del" onclick="deleteEvidence(${d.ev_id})">✗</button>
-        </td>
+        </td>` : ''}
       </tr>`;
     });
     html += '</tbody></table></div>';
@@ -239,9 +244,9 @@ async function saveEvidence() {
 
   let res;
   if (evId) {
-    res = await fetch(`/api/evidence/${evId}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    res = await fetch(`/api/evidence/${evId}`, {method:'PUT', headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrfToken}, body:JSON.stringify(body)});
   } else {
-    res = await fetch('/api/evidence', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    res = await fetch('/api/evidence', {method:'POST', headers:{'Content-Type':'application/json', 'X-CSRF-Token': csrfToken}, body:JSON.stringify(body)});
   }
   const d = await res.json();
   if (d.ok) {
@@ -255,7 +260,7 @@ async function saveEvidence() {
 
 async function deleteEvidence(evId) {
   if (!confirm('이 증빙자료를 삭제하시겠습니까?')) return;
-  const res = await fetch(`/api/evidence/${evId}`, {method:'DELETE'});
+  const res = await fetch(`/api/evidence/${evId}`, {method:'DELETE', headers:{'X-CSRF-Token': csrfToken}});
   const d = await res.json();
   if (d.ok) { showToast('삭제 완료'); loadEvidence(); }
 }

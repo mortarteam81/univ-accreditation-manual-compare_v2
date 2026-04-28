@@ -10,14 +10,22 @@ import os
 import sys
 import sqlite3
 import uuid
+import csv
+import secrets
 from functools import wraps
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_file
 
 from ai_service import ask_ai
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
+
+try:
+    from authlib.integrations.flask_client import OAuth
+except ImportError:
+    OAuth = None
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
@@ -25,6 +33,9 @@ sys.stderr.reconfigure(encoding="utf-8")
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-only-change-me")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}
 
 DB_PATH = Path(__file__).parent / "accreditation_review.db"
 APP_DIR = Path(__file__).parent
@@ -34,12 +45,32 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     "hwp", "hwpx", "zip", "png", "jpg", "jpeg",
 }
 SUBMISSION_STATUSES = {"not_submitted", "submitted", "revision_requested", "approved"}
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+DEV_AUTH_ENABLED = os.environ.get("DEV_AUTH_ENABLED", "").lower() in {"1", "true", "yes"}
+
+
+def oidc_configured():
+    return all(
+        os.environ.get(key)
+        for key in ("OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_SERVER_METADATA_URL")
+    )
+
+
+oauth = OAuth(app) if OAuth else None
+if oauth and oidc_configured():
+    oauth.register(
+        name="oidc",
+        client_id=os.environ["OIDC_CLIENT_ID"],
+        client_secret=os.environ["OIDC_CLIENT_SECRET"],
+        server_metadata_url=os.environ["OIDC_SERVER_METADATA_URL"],
+        client_kwargs={"scope": "openid email profile"},
+    )
 
 
 # ─── DB 헬퍼 ───────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=15)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -62,14 +93,135 @@ def now_iso():
     return datetime.now().isoformat(timespec="seconds")
 
 
+def normalize_email(value):
+    return (value or "").strip().lower()
+
+
+def is_safe_next_url(value):
+    if not value:
+        return False
+    parsed = urlparse(value)
+    return not parsed.scheme and not parsed.netloc and value.startswith("/")
+
+
+def safe_next_url(value, fallback="/"):
+    return value if is_safe_next_url(value) else fallback
+
+
+def get_csrf_token():
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+def validate_csrf():
+    sent = request.headers.get("X-CSRF-Token", "")
+    expected = session.get("csrf_token", "")
+    return bool(sent and expected and secrets.compare_digest(sent, expected))
+
+
+def bool_from_env(value, default=True):
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def parse_initial_admin_emails():
+    raw = os.environ.get("INITIAL_ADMIN_EMAILS", "")
+    return [normalize_email(x) for x in raw.replace("\n", ",").split(",") if normalize_email(x)]
+
+
+def upsert_seed_user(conn, email, display_name="", role="department", department=None, is_active=True):
+    email = normalize_email(email)
+    if not email:
+        return
+    now = now_iso()
+    role = role if role in {"admin", "department"} else "department"
+    dummy_hash = generate_password_hash(secrets.token_urlsafe(24))
+    conn.execute("""
+        INSERT INTO users (
+            email, password_hash, display_name, role, department, is_active,
+            auth_provider, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'oidc', ?, ?)
+        ON CONFLICT(email) DO UPDATE SET
+            display_name=excluded.display_name,
+            role=excluded.role,
+            department=excluded.department,
+            is_active=excluded.is_active,
+            auth_provider=COALESCE(users.auth_provider, 'oidc'),
+            updated_at=excluded.updated_at
+    """, (
+        email,
+        dummy_hash,
+        display_name.strip() or email,
+        role,
+        department or None,
+        1 if is_active else 0,
+        now,
+        now,
+    ))
+
+
+def seed_users_from_csv(conn):
+    path = os.environ.get("AUTH_USER_SEED_PATH")
+    if not path:
+        return
+    seed_path = Path(path).expanduser()
+    if not seed_path.exists():
+        raise FileNotFoundError(f"AUTH_USER_SEED_PATH not found: {seed_path}")
+    with seed_path.open("r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            upsert_seed_user(
+                conn,
+                row.get("email"),
+                display_name=row.get("display_name") or row.get("name") or "",
+                role=row.get("role") or "department",
+                department=row.get("department") or None,
+                is_active=bool_from_env(row.get("is_active"), default=True),
+            )
+
+
 def current_user():
     user_id = session.get("user_id")
     if not user_id:
         return None
     return query_one(
-        "SELECT user_id, email, display_name, role, department FROM users WHERE user_id=? AND is_active=1",
+        """
+        SELECT user_id, email, display_name, role, department, auth_provider,
+               oidc_subject, last_login_at
+        FROM users
+        WHERE user_id=? AND is_active=1
+        """,
         (user_id,),
     )
+
+
+def set_login_session(user):
+    session.clear()
+    session["user_id"] = user["user_id"]
+    session["email"] = user["email"]
+    session["role"] = user["role"]
+    session["csrf_token"] = secrets.token_urlsafe(32)
+
+
+def audit_context(user=None):
+    user = user or current_user() or {}
+    return {
+        "actor_user_id": user.get("user_id"),
+        "actor_email": user.get("email"),
+        "actor_role": user.get("role"),
+        "actor_department": user.get("department"),
+        "ip_address": request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip(),
+        "user_agent": request.headers.get("User-Agent", "")[:500],
+    }
+
+
+def user_is_admin(user=None):
+    user = user or current_user()
+    return bool(user and user.get("role") == "admin")
 
 
 def wants_json_response():
@@ -97,6 +249,47 @@ def admin_required(fn):
             return jsonify({"error": "admin required"}), 403
         return fn(*args, **kwargs)
     return wrapper
+
+
+PUBLIC_ENDPOINTS = {
+    "static",
+    "login_page",
+    "oidc_start",
+    "oidc_callback",
+    "logout_page",
+}
+
+
+@app.context_processor
+def inject_auth_context():
+    return {
+        "csrf_token": get_csrf_token,
+        "current_user": current_user,
+        "dev_auth_enabled": DEV_AUTH_ENABLED,
+        "oidc_enabled": bool(oauth and oidc_configured()),
+    }
+
+
+@app.before_request
+def enforce_auth_and_csrf():
+    if request.endpoint in PUBLIC_ENDPOINTS or request.path == "/favicon.ico":
+        return None
+
+    if request.path.startswith("/static/"):
+        return None
+
+    user = current_user()
+    if not user:
+        if wants_json_response():
+            return jsonify({"error": "login required"}), 401
+        next_url = safe_next_url(request.full_path.rstrip("?"), "/")
+        return redirect(url_for("login_page", next=next_url))
+
+    if request.method in MUTATING_METHODS and request.path.startswith("/api/"):
+        if not validate_csrf():
+            return jsonify({"error": "invalid csrf token"}), 403
+
+    return None
 
 
 def support_departments_match(support_departments, department):
@@ -139,6 +332,67 @@ def get_submission_for_user(conn, submission_id, user):
     return data if user_can_access_submission(user, data) else None
 
 
+def change_acl_sql(detail_alias="detail"):
+    return f"""
+        (
+            EXISTS (
+                SELECT 1
+                FROM department_action da_acl
+                WHERE da_acl.change_id = {detail_alias}.change_id
+                  AND (
+                    da_acl.primary_department = ?
+                    OR (';' || COALESCE(da_acl.support_departments, '') || ';') LIKE ?
+                  )
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM change_department cd_acl
+                JOIN departments d_acl ON d_acl.dept_id = cd_acl.dept_id
+                WHERE cd_acl.change_id = {detail_alias}.change_id
+                  AND d_acl.dept_name = ?
+            )
+        )
+    """
+
+
+def add_change_acl_filter(sql, params, user, detail_alias="detail"):
+    if not user or user.get("role") == "admin":
+        return sql, params
+    department = user.get("department") or ""
+    sql += f" AND {change_acl_sql(detail_alias)}"
+    params.extend([department, f"%;{department};%", department])
+    return sql, params
+
+
+def user_can_access_change(conn, change_id, user):
+    if not user:
+        return False
+    if user.get("role") == "admin":
+        return True
+    department = user.get("department") or ""
+    if not department:
+        return False
+    row = conn.execute(f"""
+        SELECT 1
+        FROM change_atom ca
+        WHERE ca.change_id = ?
+          AND {change_acl_sql("ca")}
+        LIMIT 1
+    """, (change_id, department, f"%;{department};%", department)).fetchone()
+    return bool(row)
+
+
+def criterion_acl_sql(alias="ca"):
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM change_atom ca_acl
+            WHERE ca_acl.cycle4_criterion = {alias}.cycle4_criterion
+              AND {change_acl_sql("ca_acl")}
+        )
+    """
+
+
 def allowed_upload(filename):
     if "." not in filename:
         return False
@@ -155,6 +409,15 @@ def file_sha256(path):
 
 # ─── DB 초기화: 추가 테이블 ────────────────────────────
 
+def ensure_column(conn, table, column, definition):
+    existing = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def init_extra_tables():
     conn = get_db()
 
@@ -168,9 +431,21 @@ def init_extra_tables():
             new_status TEXT,
             note TEXT,
             reviewer TEXT DEFAULT 'user',
+            actor_user_id INTEGER,
+            actor_email TEXT,
+            actor_role TEXT,
+            actor_department TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
             created_at TEXT NOT NULL
         )
     """)
+    ensure_column(conn, "review_log", "actor_user_id", "INTEGER")
+    ensure_column(conn, "review_log", "actor_email", "TEXT")
+    ensure_column(conn, "review_log", "actor_role", "TEXT")
+    ensure_column(conn, "review_log", "actor_department", "TEXT")
+    ensure_column(conn, "review_log", "ip_address", "TEXT")
+    ensure_column(conn, "review_log", "user_agent", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_rlog_change ON review_log(change_id)")
 
     # 부서 마스터
@@ -228,11 +503,20 @@ def init_extra_tables():
             role TEXT NOT NULL CHECK(role IN ('admin', 'department')),
             department TEXT,
             is_active INTEGER DEFAULT 1,
-            created_at TEXT NOT NULL
+            oidc_subject TEXT,
+            auth_provider TEXT DEFAULT 'oidc',
+            last_login_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT
         )
     """)
+    ensure_column(conn, "users", "oidc_subject", "TEXT")
+    ensure_column(conn, "users", "auth_provider", "TEXT DEFAULT 'oidc'")
+    ensure_column(conn, "users", "last_login_at", "TEXT")
+    ensure_column(conn, "users", "updated_at", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_department ON users(department)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_users_oidc_subject ON users(oidc_subject)")
 
     # 체크리스트 항목별 제출 상태
     conn.execute("""
@@ -320,8 +604,11 @@ def init_extra_tables():
 
     # 개발용 로그인 계정. 운영 전 반드시 비밀번호 교체/SSO 전환 필요.
     conn.execute("""
-        INSERT OR IGNORE INTO users (email, password_hash, display_name, role, department, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO users (
+            email, password_hash, display_name, role, department,
+            auth_provider, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'dev', ?, ?)
     """, (
         "admin@local.accreditation",
         generate_password_hash(os.environ.get("ADMIN_SEED_PASSWORD", "admin1234")),
@@ -329,11 +616,15 @@ def init_extra_tables():
         "admin",
         None,
         now,
+        now,
     ))
     for name, code, _cat, _order in seed_depts:
         conn.execute("""
-            INSERT OR IGNORE INTO users (email, password_hash, display_name, role, department, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO users (
+                email, password_hash, display_name, role, department,
+                auth_provider, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'dev', ?, ?)
         """, (
             f"{code.lower()}@local.accreditation",
             generate_password_hash(os.environ.get("DEPT_SEED_PASSWORD", "dept1234")),
@@ -341,7 +632,13 @@ def init_extra_tables():
             "department",
             name,
             now,
+            now,
         ))
+
+    for email in parse_initial_admin_emails():
+        upsert_seed_user(conn, email, display_name=email, role="admin", department=None, is_active=True)
+    seed_users_from_csv(conn)
+    conn.execute("UPDATE users SET updated_at = COALESCE(updated_at, created_at)")
 
     # evidence_checklist를 제출 과제로 투영하되 원천 테이블은 수정하지 않는다.
     checklist_exists = conn.execute("""
@@ -372,31 +669,137 @@ def handle_file_too_large(_error):
     return jsonify({"error": "파일은 50MB 이하만 업로드할 수 있습니다"}), 413
 
 
+def render_login_error(message, status=400):
+    return render_template(
+        "login.html",
+        error=message,
+        oauth_configured=bool(oauth and oidc_configured()),
+        authlib_installed=bool(OAuth),
+        dev_auth_enabled=DEV_AUTH_ENABLED,
+        next_url=safe_next_url(request.args.get("next"), "/"),
+    ), status
+
+
+def login_user_from_oidc_claims(claims):
+    email = normalize_email(claims.get("email"))
+    if not email:
+        return None, "OIDC 계정 이메일을 확인할 수 없습니다"
+    if claims.get("email_verified") is False:
+        return None, "이메일 인증이 완료된 Google 계정만 사용할 수 있습니다"
+
+    conn = get_db()
+    user = conn.execute("""
+        SELECT user_id, email, display_name, role, department, is_active
+        FROM users
+        WHERE email = ?
+    """, (email,)).fetchone()
+    if not user:
+        conn.close()
+        return None, "이 계정은 아직 앱 접근 허용 목록에 없습니다"
+    if not user["is_active"]:
+        conn.close()
+        return None, "비활성화된 계정입니다"
+
+    now = now_iso()
+    conn.execute("""
+        UPDATE users
+        SET oidc_subject = COALESCE(?, oidc_subject),
+            auth_provider = 'google',
+            last_login_at = ?,
+            updated_at = ?
+        WHERE user_id = ?
+    """, (claims.get("sub"), now, now, user["user_id"]))
+    conn.commit()
+    refreshed = conn.execute("""
+        SELECT user_id, email, display_name, role, department, auth_provider,
+               oidc_subject, last_login_at
+        FROM users
+        WHERE user_id = ?
+    """, (user["user_id"],)).fetchone()
+    conn.close()
+    data = dict(refreshed)
+    set_login_session(data)
+    return data, None
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
+    next_url = safe_next_url(request.args.get("next"), "/")
     if request.method in {"GET", "HEAD"}:
         if current_user():
-            return redirect(url_for("submissions_page"))
-        return render_template("login.html")
+            return redirect(next_url)
+        return render_template(
+            "login.html",
+            oauth_configured=bool(oauth and oidc_configured()),
+            authlib_installed=bool(OAuth),
+            dev_auth_enabled=DEV_AUTH_ENABLED,
+            next_url=next_url,
+        )
+
+    if not DEV_AUTH_ENABLED:
+        return render_login_error("개발용 비밀번호 로그인은 비활성화되어 있습니다", 403)
 
     email = (request.form.get("email") or "").strip().lower()
     password = request.form.get("password") or ""
-    next_url = request.args.get("next") or url_for("submissions_page")
 
     user = query_one("""
-        SELECT user_id, email, password_hash, display_name, role, department, is_active
+        SELECT user_id, email, password_hash, display_name, role, department, is_active,
+               auth_provider, oidc_subject, last_login_at
         FROM users
         WHERE email = ?
     """, (email,))
 
     if not user or not user["is_active"] or not check_password_hash(user["password_hash"], password):
-        return render_template("login.html", error="이메일 또는 비밀번호를 확인하세요", email=email), 401
+        return render_template(
+            "login.html",
+            error="이메일 또는 비밀번호를 확인하세요",
+            email=email,
+            oauth_configured=bool(oauth and oidc_configured()),
+            authlib_installed=bool(OAuth),
+            dev_auth_enabled=DEV_AUTH_ENABLED,
+            next_url=next_url,
+        ), 401
 
-    session.clear()
-    session["user_id"] = user["user_id"]
-    session["email"] = user["email"]
-    session["role"] = user["role"]
+    conn = get_db()
+    now = now_iso()
+    conn.execute("UPDATE users SET last_login_at=?, updated_at=? WHERE user_id=?", (now, now, user["user_id"]))
+    conn.commit()
+    conn.close()
+    user["last_login_at"] = now
+    set_login_session(user)
     return redirect(next_url)
+
+
+@app.route("/auth/oidc/start")
+def oidc_start():
+    if not OAuth:
+        return render_login_error("Authlib 패키지가 설치되어 있지 않습니다", 500)
+    if not oauth or not oidc_configured():
+        return render_login_error("OIDC 환경변수 설정이 필요합니다", 500)
+    next_url = safe_next_url(request.args.get("next"), "/")
+    session["auth_next"] = next_url
+    redirect_uri = os.environ.get("OIDC_REDIRECT_URI") or url_for("oidc_callback", _external=True)
+    return oauth.oidc.authorize_redirect(redirect_uri)
+
+
+@app.route("/auth/oidc/callback")
+def oidc_callback():
+    if not oauth or not oidc_configured():
+        return render_login_error("OIDC 환경변수 설정이 필요합니다", 500)
+    try:
+        token = oauth.oidc.authorize_access_token()
+    except Exception:
+        return render_login_error("OIDC 로그인 처리 중 오류가 발생했습니다", 401)
+    claims = token.get("userinfo") or {}
+    if not claims:
+        try:
+            claims = oauth.oidc.parse_id_token(token)
+        except Exception:
+            claims = {}
+    user, error = login_user_from_oidc_claims(claims)
+    if error:
+        return render_login_error(error, 403)
+    return redirect(safe_next_url(session.pop("auth_next", None), "/"))
 
 
 @app.route("/logout")
@@ -430,8 +833,9 @@ def fullview_page():
 def api_fullview():
     """섹션 유형별 전체 변경사항 (준거별 그룹핑)"""
     section = request.args.get("section", "overview")
+    user = current_user()
 
-    rows = query_all("""
+    sql = """
         SELECT
             ca.change_id, ca.change_type, ca.cycle4_criterion, ca.cycle4_title,
             ca.cycle3_criterion, ca.cycle3_title, ca.section_type, ca.section_label,
@@ -448,8 +852,13 @@ def api_fullview():
             GROUP BY change_id
         ) notes ON notes.change_id = ca.change_id
         WHERE ca.section_type = ?
+    """
+    params = [section]
+    sql, params = add_change_acl_filter(sql, params, user, detail_alias="ca")
+    sql += """
         ORDER BY ca.cycle4_criterion, ca.change_id
-    """, (section,))
+    """
+    rows = query_all(sql, params)
 
     # Group by criterion
     grouped = {}
@@ -469,49 +878,63 @@ def api_fullview():
 def api_overview():
     """전체 현황 통계"""
     stats = {}
+    user = current_user()
+    ca_where, ca_params = add_change_acl_filter(" WHERE 1=1", [], user, detail_alias="ca")
 
     # 총 변경사항 수
-    r = query_one("SELECT COUNT(*) as cnt FROM change_atom")
+    r = query_one("SELECT COUNT(*) as cnt FROM change_atom ca" + ca_where, ca_params)
     stats["total_changes"] = r["cnt"]
 
     # 검증 상태별
     rows = query_all("""
         SELECT verification_status, COUNT(*) as cnt
-        FROM change_atom GROUP BY verification_status
-    """)
+        FROM change_atom ca
+    """ + ca_where + " GROUP BY verification_status", ca_params)
     stats["verification_counts"] = {r["verification_status"]: r["cnt"] for r in rows}
 
     # 변경 유형별
     rows = query_all("""
         SELECT change_type, COUNT(*) as cnt
-        FROM change_atom GROUP BY change_type ORDER BY cnt DESC
-    """)
+        FROM change_atom ca
+    """ + ca_where + " GROUP BY change_type ORDER BY cnt DESC", ca_params)
     stats["change_type_counts"] = {r["change_type"]: r["cnt"] for r in rows}
 
     # 위험도별 (department_action 기준)
-    rows = query_all("""
-        SELECT risk_level, COUNT(*) as cnt
-        FROM department_action GROUP BY risk_level
-    """)
+    risk_sql = """
+        SELECT da.risk_level, COUNT(*) as cnt
+        FROM department_action da
+        JOIN change_atom ca ON ca.change_id = da.change_id
+    """ + ca_where + " GROUP BY da.risk_level"
+    rows = query_all(risk_sql, ca_params)
     stats["risk_counts"] = {r["risk_level"]: r["cnt"] for r in rows}
 
     # 검토 상태별
     rows = query_all("""
         SELECT human_review_status, COUNT(*) as cnt
-        FROM change_atom GROUP BY human_review_status
-    """)
+        FROM change_atom ca
+    """ + ca_where + " GROUP BY human_review_status", ca_params)
     stats["review_status_counts"] = {r["human_review_status"]: r["cnt"] for r in rows}
 
     # 총 준거 수
-    r = query_one("SELECT COUNT(DISTINCT cycle4_criterion) as cnt FROM change_atom")
+    r = query_one("SELECT COUNT(DISTINCT ca.cycle4_criterion) as cnt FROM change_atom ca" + ca_where, ca_params)
     stats["total_criteria"] = r["cnt"]
 
     # 원문 수
-    r = query_one("SELECT COUNT(*) as cnt FROM canonical_source")
+    source_sql = """
+        SELECT COUNT(DISTINCT cs.source_id) as cnt
+        FROM canonical_source cs
+        JOIN change_atom ca ON ca.source_id_3 = cs.source_id OR ca.source_id_4 = cs.source_id
+    """ + ca_where
+    r = query_one(source_sql, ca_params)
     stats["total_sources"] = r["cnt"]
 
     # 매핑 수
-    r = query_one("SELECT COUNT(*) as cnt FROM canonical_mapping")
+    mapping_sql = """
+        SELECT COUNT(DISTINCT cm.mapping_id) as cnt
+        FROM canonical_mapping cm
+        JOIN change_atom ca ON ca.cycle4_criterion = cm.cycle4_criterion
+    """ + ca_where
+    r = query_one(mapping_sql, ca_params)
     stats["total_mappings"] = r["cnt"]
 
     return jsonify(stats)
@@ -522,7 +945,10 @@ def api_overview():
 @app.route("/api/me")
 @login_required
 def api_me():
-    return jsonify(current_user())
+    user = current_user()
+    data = dict(user)
+    data["csrf_token"] = get_csrf_token()
+    return jsonify(data)
 
 
 @app.route("/api/submissions")
@@ -812,71 +1238,182 @@ def api_download_file(file_id):
 @app.route("/api/criteria-progress")
 def api_criteria_progress():
     """준거별 검토 진행률"""
-    rows = query_all("""
+    user = current_user()
+    where_sql, params = add_change_acl_filter("WHERE 1=1", [], user, detail_alias="ca")
+    rows = query_all(f"""
         SELECT
-            progress.*,
-            COALESCE(notes.note_count, 0) AS note_count,
-            COALESCE(notes.note_item_count, 0) AS note_item_count
-        FROM v_criterion_review_progress progress
+            ca.cycle4_criterion,
+            ca.cycle4_title,
+            COUNT(*) AS total_changes,
+            SUM(CASE WHEN ca.verification_status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+            SUM(CASE WHEN ca.verification_status = 'needs_review' THEN 1 ELSE 0 END) AS needs_review,
+            SUM(CASE WHEN ca.verification_status = 'candidate' THEN 1 ELSE 0 END) AS candidate,
+            ROUND(100.0 * SUM(CASE WHEN ca.verification_status = 'confirmed' THEN 1 ELSE 0 END) / COUNT(*), 1) AS confirmed_pct,
+            SUM(CASE WHEN ca.change_type = '유지' THEN 1 ELSE 0 END) AS cnt_maintained,
+            SUM(CASE WHEN ca.change_type = '변경' THEN 1 ELSE 0 END) AS cnt_changed,
+            SUM(CASE WHEN ca.change_type = '신설후보' THEN 1 ELSE 0 END) AS cnt_new,
+            SUM(CASE WHEN ca.change_type IN ('삭제후보', '삭제/이동후보') THEN 1 ELSE 0 END) AS cnt_deleted,
+            SUM(CASE WHEN ca.change_type = '이동후보' THEN 1 ELSE 0 END) AS cnt_moved,
+            COALESCE(SUM(notes.note_count), 0) AS note_count,
+            SUM(CASE WHEN COALESCE(notes.note_count, 0) > 0 THEN 1 ELSE 0 END) AS note_item_count
+        FROM change_atom ca
         LEFT JOIN (
-            SELECT
-                ca.cycle4_criterion,
-                COUNT(*) AS note_count,
-                COUNT(DISTINCT ca.change_id) AS note_item_count
-            FROM change_atom ca
-            JOIN review_log rl ON rl.change_id = ca.change_id
-            WHERE TRIM(COALESCE(rl.note, '')) <> ''
-            GROUP BY ca.cycle4_criterion
-        ) notes ON notes.cycle4_criterion = progress.cycle4_criterion
-        ORDER BY progress.cycle4_criterion
-    """)
+            SELECT change_id, COUNT(*) AS note_count
+            FROM review_log
+            WHERE TRIM(COALESCE(note, '')) <> ''
+            GROUP BY change_id
+        ) notes ON notes.change_id = ca.change_id
+        {where_sql}
+        GROUP BY ca.cycle4_criterion, ca.cycle4_title
+        ORDER BY ca.cycle4_criterion
+    """, params)
     return jsonify(rows)
 
 
 @app.route("/api/section-stats")
 def api_section_stats():
     """섹션 유형별 변경 통계"""
-    rows = query_all("SELECT * FROM v_section_change_stats")
+    user = current_user()
+    where_sql, params = add_change_acl_filter("WHERE 1=1", [], user, detail_alias="ca")
+    rows = query_all(f"""
+        SELECT
+            ca.section_type,
+            COUNT(*) AS total,
+            SUM(CASE WHEN ca.change_type = '유지' THEN 1 ELSE 0 END) AS maintained,
+            SUM(CASE WHEN ca.change_type = '변경' THEN 1 ELSE 0 END) AS changed,
+            SUM(CASE WHEN ca.change_type = '신설후보' THEN 1 ELSE 0 END) AS new_candidate,
+            SUM(CASE WHEN ca.change_type IN ('삭제후보', '삭제/이동후보') THEN 1 ELSE 0 END) AS deleted,
+            SUM(CASE WHEN ca.change_type = '이동후보' THEN 1 ELSE 0 END) AS moved
+        FROM change_atom ca
+        {where_sql}
+        GROUP BY ca.section_type
+        ORDER BY total DESC
+    """, params)
     return jsonify(rows)
 
 
 @app.route("/api/department-workload")
 def api_department_workload():
     """부서별 업무량"""
-    rows = query_all("SELECT * FROM v_department_workload")
+    user = current_user()
+    params = []
+    sql = """
+        SELECT
+            da.primary_department,
+            COUNT(*) AS total_actions,
+            SUM(CASE WHEN da.risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk,
+            SUM(CASE WHEN da.risk_level = 'medium' THEN 1 ELSE 0 END) AS medium_risk,
+            SUM(CASE WHEN da.official_confirmation_needed = 1 THEN 1 ELSE 0 END) AS official_needed,
+            SUM(CASE WHEN da.notice_required = 1 THEN 1 ELSE 0 END) AS notice_needed
+        FROM department_action da
+        JOIN change_atom ca ON ca.change_id = da.change_id
+        WHERE da.primary_department IS NOT NULL
+    """
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        sql += """
+            AND (
+                da.primary_department = ?
+                OR (';' || COALESCE(da.support_departments, '') || ';') LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM change_department cd_acl
+                    JOIN departments d_acl ON d_acl.dept_id = cd_acl.dept_id
+                    WHERE cd_acl.change_id = da.change_id
+                      AND d_acl.dept_name = ?
+                )
+            )
+        """
+        params.extend([department, f"%;{department};%", department])
+    sql += " GROUP BY da.primary_department ORDER BY total_actions DESC"
+    rows = query_all(sql, params)
     return jsonify(rows)
 
 
 @app.route("/api/mapping-overview")
 def api_mapping_overview():
     """3↔4주기 준거 매핑 현황"""
-    rows = query_all("SELECT * FROM v_mapping_overview")
+    user = current_user()
+    sql = "SELECT DISTINCT cm.* FROM canonical_mapping cm WHERE 1=1"
+    params = []
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        sql += f" AND {criterion_acl_sql('cm')}"
+        params.extend([department, f"%;{department};%", department])
+    sql += " ORDER BY cm.cycle4_criterion, cm.cycle3_criterion"
+    rows = query_all(sql, params)
     return jsonify(rows)
 
 
 @app.route("/api/criteria-list")
 def api_criteria_list():
     """준거 목록 (필터용)"""
-    rows = query_all("""
+    user = current_user()
+    sql = """
         SELECT DISTINCT cycle4_criterion, cycle4_title
-        FROM change_atom
+        FROM change_atom ca
+        WHERE 1=1
+    """
+    params = []
+    sql, params = add_change_acl_filter(sql, params, user, detail_alias="ca")
+    sql += """
         ORDER BY cycle4_criterion
-    """)
+    """
+    rows = query_all(sql, params)
     return jsonify(rows)
 
 
-@app.route("/api/changes")
-def api_changes():
-    """변경사항 목록 (필터 지원)"""
-    criterion = request.args.get("criterion", "")
-    section = request.args.get("section", "")
-    change_type = request.args.get("change_type", "")
-    status = request.args.get("status", "")
+def build_change_filters(args, include_status=True):
+    """Build shared WHERE clauses for comparison review filters."""
+    clauses = ["1=1"]
+    params = []
 
-    sql = """
-        SELECT
-            detail.*,
-            COALESCE(notes.note_count, 0) AS note_count
+    criterion = args.get("criterion", "")
+    section = args.get("section", "")
+    change_type = args.get("change_type", "")
+    status = args.get("status", "")
+    keyword = args.get("q", "").strip()
+    has_note = args.get("has_note", "")
+
+    if criterion:
+        clauses.append("detail.cycle4_criterion = ?")
+        params.append(criterion)
+    if section:
+        clauses.append("detail.section_type = ?")
+        params.append(section)
+    if change_type:
+        clauses.append("detail.change_type = ?")
+        params.append(change_type)
+    if include_status and status:
+        clauses.append("detail.verification_status = ?")
+        params.append(status)
+    if keyword:
+        like = f"%{keyword}%"
+        clauses.append("""
+            (
+                detail.change_id LIKE ?
+                OR detail.cycle4_criterion LIKE ?
+                OR detail.cycle4_title LIKE ?
+                OR detail.cycle3_criterion LIKE ?
+                OR detail.cycle3_title LIKE ?
+                OR detail.section_label LIKE ?
+                OR detail.source_text_3 LIKE ?
+                OR detail.source_text_4 LIKE ?
+                OR detail.review_reason LIKE ?
+                OR detail.change_categories LIKE ?
+                OR risk.primary_departments LIKE ?
+            )
+        """)
+        params.extend([like] * 11)
+    if has_note == "1":
+        clauses.append("COALESCE(notes.note_count, 0) > 0")
+
+    return " AND ".join(clauses), params
+
+
+def change_review_base_query():
+    """Base SELECT for comparison review rows."""
+    return """
         FROM v_change_detail detail
         LEFT JOIN (
             SELECT change_id, COUNT(*) AS note_count
@@ -884,30 +1421,137 @@ def api_changes():
             WHERE TRIM(COALESCE(note, '')) <> ''
             GROUP BY change_id
         ) notes ON notes.change_id = detail.change_id
-        WHERE 1=1
+        LEFT JOIN (
+            SELECT
+                change_id,
+                MAX(CASE risk_level
+                    WHEN 'high' THEN 3
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 1
+                    ELSE 0
+                END) AS risk_rank,
+                SUM(CASE WHEN risk_level = 'high' THEN 1 ELSE 0 END) AS high_risk_count,
+                SUM(CASE WHEN risk_level = 'medium' THEN 1 ELSE 0 END) AS medium_risk_count,
+                GROUP_CONCAT(DISTINCT primary_department) AS primary_departments
+            FROM department_action
+            GROUP BY change_id
+        ) risk ON risk.change_id = detail.change_id
     """
-    params = []
 
-    if criterion:
-        sql += " AND detail.cycle4_criterion = ?"
-        params.append(criterion)
-    if section:
-        sql += " AND detail.section_type = ?"
-        params.append(section)
-    if change_type:
-        sql += " AND detail.change_type = ?"
-        params.append(change_type)
-    if status:
-        sql += " AND detail.verification_status = ?"
-        params.append(status)
 
+@app.route("/api/changes")
+def api_changes():
+    """변경사항 목록 (필터 지원)"""
+    where_sql, params = build_change_filters(request.args, include_status=True)
+    user = current_user()
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        where_sql += f" AND {change_acl_sql('detail')}"
+        params.extend([department, f"%;{department};%", department])
+    sort = request.args.get("sort", "priority")
+    order_sql = {
+        "priority": """
+            CASE
+                WHEN detail.verification_status = 'candidate' AND COALESCE(risk.risk_rank, 0) >= 3 THEN 0
+                WHEN detail.verification_status = 'needs_review' AND COALESCE(risk.risk_rank, 0) >= 3 THEN 1
+                WHEN detail.verification_status = 'candidate' THEN 2
+                WHEN detail.verification_status = 'needs_review' THEN 3
+                WHEN COALESCE(detail.manual_review_required, 0) = 1 THEN 4
+                WHEN COALESCE(risk.risk_rank, 0) >= 3 THEN 5
+                ELSE 6
+            END,
+            COALESCE(risk.risk_rank, 0) DESC,
+            COALESCE(detail.similarity, 1) ASC,
+            detail.cycle4_criterion,
+            detail.change_id
+        """,
+        "high_risk": """
+            COALESCE(risk.risk_rank, 0) DESC,
+            COALESCE(risk.high_risk_count, 0) DESC,
+            CASE detail.verification_status
+                WHEN 'candidate' THEN 0
+                WHEN 'needs_review' THEN 1
+                ELSE 2
+            END,
+            detail.cycle4_criterion,
+            detail.change_id
+        """,
+        "candidate": """
+            CASE detail.verification_status
+                WHEN 'candidate' THEN 0
+                WHEN 'needs_review' THEN 1
+                ELSE 2
+            END,
+            COALESCE(risk.risk_rank, 0) DESC,
+            detail.cycle4_criterion,
+            detail.change_id
+        """,
+        "status": """
+            CASE detail.verification_status
+                WHEN 'needs_review' THEN 0
+                WHEN 'candidate' THEN 1
+                WHEN 'deferred' THEN 2
+                WHEN 'rejected' THEN 3
+                WHEN 'confirmed' THEN 4
+                ELSE 5
+            END,
+            detail.cycle4_criterion,
+            detail.change_id
+        """,
+        "similarity_low": """
+            CASE WHEN detail.similarity IS NULL THEN 1 ELSE 0 END,
+            detail.similarity ASC,
+            COALESCE(risk.risk_rank, 0) DESC,
+            detail.cycle4_criterion,
+            detail.change_id
+        """,
+        "criterion": "detail.cycle4_criterion, detail.section_type, detail.change_id",
+    }.get(sort, "detail.cycle4_criterion, detail.section_type, detail.change_id")
+
+    sql = """
+        SELECT
+            detail.*,
+            COALESCE(notes.note_count, 0) AS note_count,
+            COALESCE(risk.risk_rank, 0) AS risk_rank,
+            COALESCE(risk.high_risk_count, 0) AS high_risk_count,
+            COALESCE(risk.medium_risk_count, 0) AS medium_risk_count,
+            COALESCE(risk.primary_departments, '') AS primary_departments
+    """ + change_review_base_query() + f"""
+        WHERE {where_sql}
+        ORDER BY {order_sql}
+    """
     rows = query_all(sql, params)
     return jsonify(rows)
+
+
+@app.route("/api/change-status-summary")
+def api_change_status_summary():
+    """상태 메뉴 카운트 (현재 필터 기준, 상태 필터 제외)."""
+    where_sql, params = build_change_filters(request.args, include_status=False)
+    user = current_user()
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        where_sql += f" AND {change_acl_sql('detail')}"
+        params.extend([department, f"%;{department};%", department])
+    rows = query_all("""
+        SELECT detail.verification_status AS status, COUNT(*) AS cnt
+    """ + change_review_base_query() + f"""
+        WHERE {where_sql}
+        GROUP BY detail.verification_status
+    """, params)
+    return jsonify({r["status"]: r["cnt"] for r in rows})
 
 
 @app.route("/api/change/<change_id>")
 def api_change_detail(change_id):
     """변경사항 상세 + 매칭 후보"""
+    user = current_user()
+    conn = get_db()
+    allowed = user_can_access_change(conn, change_id, user)
+    conn.close()
+    if not allowed:
+        return jsonify({"error": "not found"}), 404
+
     change = query_one(
         "SELECT * FROM v_change_detail WHERE change_id = ?",
         (change_id,),
@@ -937,7 +1581,9 @@ def api_change_detail(change_id):
 @app.route("/api/risk-heatmap")
 def api_risk_heatmap():
     """준거×섹션 위험도 히트맵 데이터"""
-    rows = query_all("""
+    user = current_user()
+    where_sql, params = add_change_acl_filter("WHERE 1=1", [], user, detail_alias="ca")
+    rows = query_all(f"""
         SELECT
             da.cycle4_criterion,
             da.section_type,
@@ -945,21 +1591,24 @@ def api_risk_heatmap():
             SUM(CASE WHEN da.risk_level = 'high' THEN 1 ELSE 0 END) as high_cnt,
             SUM(CASE WHEN da.risk_level = 'medium' THEN 1 ELSE 0 END) as medium_cnt
         FROM department_action da
+        JOIN change_atom ca ON ca.change_id = da.change_id
+        {where_sql}
         GROUP BY da.cycle4_criterion, da.section_type
         ORDER BY da.cycle4_criterion, da.section_type
-    """)
+    """, params)
     return jsonify(rows)
 
 
 # ─── 검토 워크플로우 API ─────────────────────────────────
 
 @app.route("/api/change/<change_id>/status", methods=["PATCH"])
+@admin_required
 def api_update_status(change_id):
     """변경사항의 검토 상태를 업데이트"""
+    user = current_user()
     data = request.get_json(silent=True) or {}
     new_status = data.get("status")  # confirmed / needs_review / rejected
     note = data.get("note", "")
-    reviewer = data.get("reviewer", "user")
 
     valid = {"confirmed", "needs_review", "rejected", "deferred"}
     if new_status not in valid:
@@ -975,9 +1624,13 @@ def api_update_status(change_id):
     if not row:
         conn.close()
         return jsonify({"error": "change not found"}), 404
+    if not user_can_access_change(conn, change_id, user):
+        conn.close()
+        return jsonify({"error": "change not found"}), 404
 
     old_status = row["verification_status"]
     now = datetime.now().isoformat()
+    audit = audit_context(user)
 
     # 상태 업데이트
     review_status_map = {
@@ -995,9 +1648,17 @@ def api_update_status(change_id):
 
     # 로그 기록
     log_cursor = conn.execute("""
-        INSERT INTO review_log (change_id, action, old_status, new_status, note, reviewer, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (change_id, "status_change", old_status, new_status, note, reviewer, now))
+        INSERT INTO review_log (
+            change_id, action, old_status, new_status, note, reviewer,
+            actor_user_id, actor_email, actor_role, actor_department,
+            ip_address, user_agent, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        change_id, "status_change", old_status, new_status, note, audit["actor_email"],
+        audit["actor_user_id"], audit["actor_email"], audit["actor_role"], audit["actor_department"],
+        audit["ip_address"], audit["user_agent"], now,
+    ))
 
     conn.commit()
 
@@ -1021,20 +1682,33 @@ def api_update_status(change_id):
 @app.route("/api/change/<change_id>/note", methods=["POST"])
 def api_add_note(change_id):
     """변경사항에 검토 메모를 추가"""
+    user = current_user()
     data = request.get_json()
     note = data.get("note", "").strip()
-    reviewer = data.get("reviewer", "user")
 
     if not note:
         return jsonify({"error": "note is empty"}), 400
 
     conn = get_db()
+    if not user_can_access_change(conn, change_id, user):
+        conn.close()
+        return jsonify({"error": "change not found"}), 404
     now = datetime.now().isoformat()
+    audit = audit_context(user)
+    action = "note" if user["role"] == "admin" else "department_note"
 
     conn.execute("""
-        INSERT INTO review_log (change_id, action, note, reviewer, created_at)
-        VALUES (?, 'note', ?, ?, ?)
-    """, (change_id, note, reviewer, now))
+        INSERT INTO review_log (
+            change_id, action, note, reviewer,
+            actor_user_id, actor_email, actor_role, actor_department,
+            ip_address, user_agent, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        change_id, action, note, audit["actor_email"],
+        audit["actor_user_id"], audit["actor_email"], audit["actor_role"], audit["actor_department"],
+        audit["ip_address"], audit["user_agent"], now,
+    ))
 
     conn.commit()
     conn.close()
@@ -1045,6 +1719,12 @@ def api_add_note(change_id):
 @app.route("/api/change/<change_id>/history")
 def api_change_history(change_id):
     """변경사항의 검토 이력"""
+    user = current_user()
+    conn = get_db()
+    allowed = user_can_access_change(conn, change_id, user)
+    conn.close()
+    if not allowed:
+        return jsonify({"error": "not found"}), 404
     rows = query_all(
         "SELECT * FROM review_log WHERE change_id = ? ORDER BY created_at DESC",
         (change_id,),
@@ -1062,6 +1742,7 @@ def api_departments():
 
 
 @app.route("/api/departments", methods=["POST"])
+@admin_required
 def api_add_department():
     """부서 추가"""
     data = request.get_json()
@@ -1086,6 +1767,12 @@ def api_add_department():
 @app.route("/api/change/<change_id>/departments")
 def api_get_change_depts(change_id):
     """변경사항에 배정된 부서 목록"""
+    user = current_user()
+    conn = get_db()
+    allowed = user_can_access_change(conn, change_id, user)
+    conn.close()
+    if not allowed:
+        return jsonify({"error": "not found"}), 404
     rows = query_all("""
         SELECT cd.*, d.dept_name, d.dept_code, d.category
         FROM change_department cd
@@ -1097,11 +1784,16 @@ def api_get_change_depts(change_id):
 
 
 @app.route("/api/change/<change_id>/departments", methods=["PUT"])
+@admin_required
 def api_set_change_depts(change_id):
     """변경사항의 부서 배정 (전체 교체)"""
+    user = current_user()
     data = request.get_json()
     dept_ids = data.get("dept_ids", [])
     conn = get_db()
+    if not user_can_access_change(conn, change_id, user):
+        conn.close()
+        return jsonify({"error": "not found"}), 404
     now = datetime.now().isoformat()
     conn.execute("DELETE FROM change_department WHERE change_id = ?", (change_id,))
     for did in dept_ids:
@@ -1119,21 +1811,51 @@ def api_set_change_depts(change_id):
 @app.route("/api/evidence")
 def api_evidence_list():
     """증빙자료 목록 (준거 필터 지원)"""
+    user = current_user()
     criterion = request.args.get("criterion", "")
     cycle = request.args.get("cycle", "")
-    sql = "SELECT * FROM evidence_registry WHERE 1=1"
+    sql = "SELECT * FROM evidence_registry ev WHERE 1=1"
     params = []
     if criterion:
-        sql += " AND criterion = ?"
+        sql += " AND ev.criterion = ?"
         params.append(criterion)
     if cycle:
-        sql += " AND cycle = ?"
+        sql += " AND ev.cycle = ?"
         params.append(cycle)
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        sql += """
+            AND EXISTS (
+                SELECT 1
+                FROM change_atom ca_acl
+                WHERE ca_acl.cycle4_criterion = ev.criterion
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM department_action da_acl
+                        WHERE da_acl.change_id = ca_acl.change_id
+                          AND (
+                            da_acl.primary_department = ?
+                            OR (';' || COALESCE(da_acl.support_departments, '') || ';') LIKE ?
+                          )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM change_department cd_acl
+                        JOIN departments d_acl ON d_acl.dept_id = cd_acl.dept_id
+                        WHERE cd_acl.change_id = ca_acl.change_id
+                          AND d_acl.dept_name = ?
+                    )
+                  )
+            )
+        """
+        params.extend([department, f"%;{department};%", department])
     sql += " ORDER BY criterion, ev_id"
     return jsonify(query_all(sql, params))
 
 
 @app.route("/api/evidence", methods=["POST"])
+@admin_required
 def api_add_evidence():
     """증빙자료 등록"""
     data = request.get_json()
@@ -1157,6 +1879,7 @@ def api_add_evidence():
 
 
 @app.route("/api/evidence/<int:ev_id>", methods=["PUT"])
+@admin_required
 def api_update_evidence(ev_id):
     """증빙자료 수정"""
     data = request.get_json()
@@ -1176,6 +1899,7 @@ def api_update_evidence(ev_id):
 
 
 @app.route("/api/evidence/<int:ev_id>", methods=["DELETE"])
+@admin_required
 def api_delete_evidence(ev_id):
     """증빙자료 삭제"""
     conn = get_db()
@@ -1188,14 +1912,46 @@ def api_delete_evidence(ev_id):
 @app.route("/api/evidence/summary")
 def api_evidence_summary():
     """준거별 증빙자료 등록 현황"""
-    rows = query_all("""
-        SELECT criterion, COUNT(*) as total,
+    user = current_user()
+    sql = """
+        SELECT ev.criterion, COUNT(*) as total,
                SUM(CASE WHEN cycle='3' THEN 1 ELSE 0 END) as cycle3,
                SUM(CASE WHEN cycle='4' THEN 1 ELSE 0 END) as cycle4,
                SUM(CASE WHEN is_reusable=1 THEN 1 ELSE 0 END) as reusable
-        FROM evidence_registry
-        GROUP BY criterion ORDER BY criterion
-    """)
+        FROM evidence_registry ev
+        WHERE 1=1
+    """
+    params = []
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        sql += """
+            AND EXISTS (
+                SELECT 1
+                FROM change_atom ca_acl
+                WHERE ca_acl.cycle4_criterion = ev.criterion
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM department_action da_acl
+                        WHERE da_acl.change_id = ca_acl.change_id
+                          AND (
+                            da_acl.primary_department = ?
+                            OR (';' || COALESCE(da_acl.support_departments, '') || ';') LIKE ?
+                          )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM change_department cd_acl
+                        JOIN departments d_acl ON d_acl.dept_id = cd_acl.dept_id
+                        WHERE cd_acl.change_id = ca_acl.change_id
+                          AND d_acl.dept_name = ?
+                    )
+                  )
+            )
+        """
+        params.extend([department, f"%;{department};%", department])
+    sql += " GROUP BY ev.criterion ORDER BY ev.criterion"
+    rows = query_all(sql, params)
     return jsonify(rows)
 
 
@@ -1211,6 +1967,7 @@ def evidence_page():
 @app.route("/api/ai/ask", methods=["POST"])
 def api_ai_ask():
     """AI에게 질문 (RAG)"""
+    user = current_user()
     data = request.get_json()
     query = data.get("query", "")
     criterion = data.get("criterion", "")
@@ -1218,6 +1975,20 @@ def api_ai_ask():
     
     if not query and context_type == "general":
         return jsonify({"error": "질문 내용을 입력하세요"}), 400
+
+    if user and user.get("role") == "department":
+        if not criterion:
+            return jsonify({"error": "부서 담당자는 접근 가능한 준거를 선택한 뒤 질문할 수 있습니다"}), 403
+        department = user.get("department") or ""
+        allowed = query_one(f"""
+            SELECT 1 AS ok
+            FROM change_atom ca
+            WHERE ca.cycle4_criterion = ?
+              AND {change_acl_sql("ca")}
+            LIMIT 1
+        """, (criterion, department, f"%;{department};%", department))
+        if not allowed:
+            return jsonify({"error": "접근 권한이 없는 준거입니다"}), 403
         
     result = ask_ai(DB_PATH, query, criterion, context_type)
     
@@ -1232,10 +2003,32 @@ def api_ai_ask():
 @app.route("/api/graph/data")
 def api_graph_data():
     """지식그래프 시각화 데이터 (vis.js 호환)"""
+    user = current_user()
     conn = get_db()
     
     # 노드 로드 (충분히 크게)
-    node_rows = conn.execute("SELECT node_id, node_type, title, label FROM graph_nodes LIMIT 1500").fetchall()
+    if user and user.get("role") == "department":
+        department = user.get("department") or ""
+        node_rows = conn.execute(f"""
+            WITH accessible_changes AS (
+                SELECT ca.change_id, ca.cycle4_criterion
+                FROM change_atom ca
+                WHERE {change_acl_sql("ca")}
+            )
+            SELECT gn.node_id, gn.node_type, gn.title, gn.label
+            FROM graph_nodes gn
+            WHERE gn.change_id IN (SELECT change_id FROM accessible_changes)
+               OR gn.criterion IN (SELECT cycle4_criterion FROM accessible_changes)
+               OR gn.action_id IN (
+                    SELECT da.action_id
+                    FROM department_action da
+                    JOIN accessible_changes ac ON ac.change_id = da.change_id
+               )
+               OR gn.department = ?
+            LIMIT 1500
+        """, (department, f"%;{department};%", department, department)).fetchall()
+    else:
+        node_rows = conn.execute("SELECT node_id, node_type, title, label FROM graph_nodes LIMIT 1500").fetchall()
     nodes = []
     
     type_colors = {

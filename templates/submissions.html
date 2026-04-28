@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>증빙 제출 — 대학기관평가인증</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -87,8 +88,14 @@ const statusLabels = {
 };
 let me = null;
 let selectedSubmissionId = null;
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
 async function api(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    options.headers = options.headers || {};
+    options.headers['X-CSRF-Token'] = csrfToken;
+  }
   const res = await fetch(path, options);
   if (res.status === 401) {
     location.href = `/login?next=${encodeURIComponent('/submissions')}`;
@@ -137,6 +144,9 @@ function toast(message, type = 'success') {
 
 async function init() {
   me = await api('/api/me');
+  if (me.csrf_token) {
+    document.querySelector('meta[name="csrf-token"]').setAttribute('content', me.csrf_token);
+  }
   document.getElementById('user-badge').textContent =
     me.role === 'admin' ? `${me.display_name} · 관리자` : `${me.department} · ${me.display_name}`;
   if (me.role === 'admin') {
