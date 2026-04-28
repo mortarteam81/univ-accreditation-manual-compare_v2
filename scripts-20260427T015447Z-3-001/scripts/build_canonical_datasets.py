@@ -16,6 +16,7 @@ import json
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -584,6 +585,65 @@ def build_mapping_rows(raw_groups: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(final_rows, key=lambda r: (r["cycle4_criterion"], r["cycle3_criterion"]))
 
 
+MIN_DIRECT_MATCH_SIMILARITY = 0.52
+
+
+def optimal_change_atom_assignments(
+    c4_items: list[dict[str, Any]],
+    c3_items: list[dict[str, Any]],
+    sources: dict[str, dict[str, Any]],
+    section_type: str,
+) -> dict[str, tuple[str, float | None]]:
+    """Choose the best one-to-one source pairing for a raw group.
+
+    A sequential greedy pass can consume a 3-cycle item for an earlier 4-cycle
+    row even when a later row is a much stronger match. The dynamic program
+    maximizes total similarity across the whole group before rows are emitted.
+    """
+    candidate_pools: list[list[tuple[str, float]]] = []
+    for c4_item in c4_items:
+        c4_src = sources[c4_item["source_id"]]
+        candidates = c3_items
+        if section_type == "evidence":
+            same_field = [
+                item
+                for item in c3_items
+                if sources[item["source_id"]]["field_name"] == c4_src["field_name"]
+            ]
+            if same_field:
+                candidates = same_field
+        scored = []
+        for c3_item in candidates:
+            sim = content_similarity(c4_item["content"], c3_item["content"])
+            if sim >= MIN_DIRECT_MATCH_SIMILARITY:
+                scored.append((c3_item["source_id"], sim))
+        candidate_pools.append(sorted(scored, key=lambda item: item[1], reverse=True))
+
+    @lru_cache(maxsize=None)
+    def solve(index: int, used_key: tuple[str, ...]) -> tuple[float, tuple[tuple[str, float | None], ...]]:
+        if index >= len(c4_items):
+            return 0.0, ()
+        used = set(used_key)
+        best_score, tail = solve(index + 1, used_key)
+        best_assignments = (("", None),) + tail
+        for source_id, sim in candidate_pools[index]:
+            if source_id in used:
+                continue
+            next_used = tuple(sorted([*used, source_id]))
+            tail_score, tail_assignments = solve(index + 1, next_used)
+            score = sim + tail_score + 0.0001
+            if score > best_score:
+                best_score = score
+                best_assignments = ((source_id, sim),) + tail_assignments
+        return best_score, best_assignments
+
+    _score, assignments = solve(0, ())
+    return {
+        c4_item["source_id"]: assignments[index]
+        for index, c4_item in enumerate(c4_items)
+    }
+
+
 def build_change_atoms(
     raw_groups: list[dict[str, Any]],
     sources: dict[str, dict[str, Any]],
@@ -595,37 +655,26 @@ def build_change_atoms(
     for group in raw_groups:
         c4_items = group["source_refs_4"]
         c3_items = group["source_refs_3"]
+        assignments = optimal_change_atom_assignments(
+            c4_items,
+            c3_items,
+            sources,
+            group["section_type"],
+        )
         used_c3: set[str] = set()
 
         for c4_item in c4_items:
             c4_src = sources[c4_item["source_id"]]
-            candidates = c3_items
-            if group["section_type"] == "evidence":
-                same_field = [
-                    item
-                    for item in c3_items
-                    if sources[item["source_id"]]["field_name"] == c4_src["field_name"]
-                ]
-                if same_field:
-                    candidates = same_field
-            best: dict[str, str] | None = None
-            best_sim = -1.0
-            for c3_item in candidates:
-                if c3_item["source_id"] in used_c3:
-                    continue
-                sim = content_similarity(c4_item["content"], c3_item["content"])
-                if sim > best_sim:
-                    best_sim = sim
-                    best = c3_item
+            assigned_source_id, best_sim = assignments.get(c4_item["source_id"], ("", None))
 
-            if best is None or best_sim < 0.52:
+            if not assigned_source_id or best_sim is None:
                 change_type = "신설후보"
                 source_id_3 = ""
                 source_text_3 = ""
                 sim_value: float | None = None
             else:
-                source_id_3 = best["source_id"]
-                source_text_3 = best["content"]
+                source_id_3 = assigned_source_id
+                source_text_3 = sources[source_id_3]["content"]
                 used_c3.add(source_id_3)
                 sim_value = best_sim
                 change_type = infer_change_type(best_sim)

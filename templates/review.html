@@ -301,6 +301,36 @@ function compositeSourceList(sources) {
   `).join('');
 }
 
+function matchCandidateConflictHtml(candidate) {
+  const conflicts = candidate.conflict_changes || [];
+  if (!conflicts.length) {
+    return '<div class="match-conflict clear">충돌 항목 없음</div>';
+  }
+  return `<div class="match-conflict">
+    <strong>충돌 가능 항목</strong>
+    ${conflicts.map(item => `<div class="match-conflict-item">
+      <span>${escapeHtml(item.change_id || '')}</span>
+      <span>${escapeHtml(item.verification_status || '')}</span>
+      <span>${escapeHtml(item.source_id_3 || '')} ↔ ${escapeHtml(item.source_id_4 || '')}</span>
+    </div>`).join('')}
+  </div>`;
+}
+
+function matchCandidateActions(candidate, changeId) {
+  if (!canManageReview) return '';
+  const status = candidate.review_status || 'candidate';
+  const isApproved = status === 'approved';
+  const isMappingApplied = Boolean(candidate.mapping_applied_at);
+  const isPromoted = Boolean(candidate.promoted_composite_id);
+  return `<div class="match-actions">
+    <button class="btn-match approve" onclick="setMatchCandidateStatus('${candidate.match_id}', 'approved', '${changeId}')">후보 승인</button>
+    <button class="btn-match reject" onclick="setMatchCandidateStatus('${candidate.match_id}', 'rejected', '${changeId}')">반려</button>
+    <button class="btn-match review" onclick="setMatchCandidateStatus('${candidate.match_id}', 'needs_review', '${changeId}')">재검토</button>
+    <button class="btn-match apply" onclick="applyMatchCandidate('${candidate.match_id}', '${changeId}')" ${isApproved && !isMappingApplied ? '' : 'disabled'}>${isMappingApplied ? '매칭 적용 완료' : '실제 매칭 적용'}</button>
+    <button class="btn-match promote" onclick="promoteMatchCandidate('${candidate.match_id}', '${changeId}')" ${isPromoted ? 'disabled' : ''}>${isPromoted ? '복합 승격 완료' : '복합 후보 승격'}</button>
+  </div>`;
+}
+
 function assignmentTypeLabel(type) {
   const labels = {
     primary: ['주 귀속', 'primary'],
@@ -463,11 +493,31 @@ async function openDetail(changeId) {
   let matchHtml = '';
   if (mc.length) {
     matchHtml = `<div class="detail-section"><h4>🔍 AI 매칭 후보 (상위 ${mc.length}건)</h4><div class="match-list">` +
-      mc.map(m => `<div class="match-item">
-        <span class="match-rank">#${m.rank}</span>
-        <span class="match-score ${simColor(m.score)}">${(m.score*100).toFixed(0)}%</span>
-        <span class="match-id">${m.candidate_source_id || ''}</span>
-        <span class="match-text">${truncate(m.candidate_text, 120)}</span>
+      mc.map(m => `<div class="match-item match-card">
+        <div class="match-head">
+          <span class="match-rank">#${m.rank}</span>
+          <span class="match-score ${simColor(m.score)}">${(m.score*100).toFixed(0)}%</span>
+          ${compositeStatusLabel(m.review_status)}
+          ${m.applied_at ? `<span class="match-applied">검토 등록 ${escapeHtml(m.applied_at.slice(0,16).replace('T',' '))}</span>` : ''}
+          ${m.mapping_applied_at ? `<span class="match-applied">매칭 적용 ${escapeHtml(m.mapping_applied_at.slice(0,16).replace('T',' '))}</span>` : ''}
+          ${m.promoted_composite_id ? `<span class="match-promoted">복합 ${escapeHtml(m.promoted_composite_id)}</span>` : ''}
+        </div>
+        <div class="match-candidate-grid">
+          <div>
+            <div class="match-grid-label">기준 원문</div>
+            <div class="match-id">${escapeHtml(m.query_source_id || '')}</div>
+            <div class="match-text">${truncate(m.query_text, 150)}</div>
+          </div>
+          <div>
+            <div class="match-grid-label">AI 후보</div>
+            <div class="match-id">${escapeHtml(m.candidate_source_id || '')}</div>
+            <div class="match-text">${truncate(m.candidate_text, 150)}</div>
+          </div>
+        </div>
+        <div class="match-reason">${escapeHtml(m.match_reason || '')}</div>
+        ${matchCandidateConflictHtml(m)}
+        ${m.decision_note ? `<div class="composite-note">검토 메모: ${escapeHtml(m.decision_note)}</div>` : ''}
+        ${matchCandidateActions(m, c.change_id)}
       </div>`).join('') + '</div></div>';
   }
 
@@ -528,7 +578,7 @@ async function openDetail(changeId) {
     historyHtml = `<div class="detail-section"><h4>📜 검토 이력</h4><div class="history-list">` +
       history.map(h => {
         const actor = h.actor_email || h.reviewer || 'user';
-        const actionLabel = h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : (h.action === 'department_note' ? '부서 의견' : (h.action === 'composite_match' ? '복합 매칭' : '메모'));
+        const actionLabel = h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : (h.action === 'department_note' ? '부서 의견' : (h.action === 'composite_match' ? '복합 매칭' : (h.action === 'ai_match_candidate' ? 'AI 후보' : '메모')));
         return `<div class="history-item">
         <span class="history-time">${h.created_at?.slice(0,16).replace('T',' ')}</span>
         <span class="history-action">${actionLabel}</span>
@@ -645,6 +695,71 @@ async function addNote(changeId) {
     showToast('메모 저장 완료');
     openDetail(changeId);
     loadChanges();
+  }
+}
+
+async function setMatchCandidateStatus(matchId, reviewStatus, changeId) {
+  const notes = {
+    approved: 'AI 매칭 후보를 교체 검토 대상으로 승인합니다.',
+    rejected: 'AI 매칭 후보를 현재 검토 기준에서 반려합니다.',
+    needs_review: 'AI 매칭 후보는 추가 확인이 필요합니다.',
+    candidate: 'AI 매칭 후보 상태로 되돌립니다.'
+  };
+  const res = await fetch(`/api/match-candidate/${matchId}/review`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      review_status: reviewStatus,
+      note: notes[reviewStatus] || ''
+    })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    showToast('AI 후보 검토 상태 저장 완료');
+    openDetail(changeId);
+  } else {
+    showToast(`오류: ${d.error}`, true);
+  }
+}
+
+async function applyMatchCandidate(matchId, changeId) {
+  const res = await fetch(`/api/match-candidate/${matchId}/apply`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      note: 'AI 매칭 후보 승인 결과를 실제 비교쌍에 반영합니다.'
+    })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    const message = d.already_applied
+      ? '이미 실제 매칭에 적용된 AI 후보입니다'
+      : `AI 후보 실제 매칭 적용 완료 · 조정 ${d.changed.length}건`;
+    showToast(message);
+    openDetail(changeId);
+    loadChanges();
+  } else {
+    showToast(`오류: ${d.error}`, true);
+  }
+}
+
+async function promoteMatchCandidate(matchId, changeId) {
+  const res = await fetch(`/api/match-candidate/${matchId}/promote-composite`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      note: 'AI 1:1 후보와 충돌 항목을 복합 매칭 후보로 승격합니다.'
+    })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    const message = d.already_promoted
+      ? '이미 복합 후보로 승격된 항목입니다'
+      : `복합 후보 승격 완료 · ${d.composite_id}`;
+    showToast(message);
+    openDetail(changeId);
+  } else {
+    showToast(`오류: ${d.error}`, true);
   }
 }
 

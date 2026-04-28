@@ -137,6 +137,7 @@ $env:AI_MODEL="gemma-2-9b-it"
 ### Phase 1.5 복합 매칭
 
 단일 1:1 유사도만으로 설명하기 어려운 통합·분리·재구성 사례를 잡기 위해 `composite_matching.py`를 제공합니다.
+기본 `change_atom` 생성 단계에서는 같은 raw group 안에서 4주기 항목 순서대로 3주기 항목을 소모하지 않고, 그룹 전체의 유사도 합이 최대가 되는 1:1 조합을 먼저 선택합니다. 이 보정은 `3주기 자체평가 실시 현황`처럼 뒤쪽 4주기 항목과 더 강하게 연결되는 후보가 앞쪽 항목에 먼저 배정되는 문제를 줄이기 위한 것입니다.
 
 ```bash
 python composite_matching.py --rebuild --json-summary
@@ -157,6 +158,13 @@ python composite_matching.py --rebuild --json-summary
 - `POST /api/composite/<composite_id>/apply` : 승인된 복합 후보를 관련 변경항목에 반영
   - `candidate` 또는 `deferred` 상태의 관련 항목은 `needs_review`로 이동
   - 이미 확정/반려/검토필요 상태인 항목은 상태를 덮어쓰지 않고 `composite_match` 메모만 남김
+- `PATCH /api/match-candidate/<match_id>/review` : AI 1:1 후보 승인/반려/재검토 상태 저장
+  - 관리자 전용, `match_candidate_log`에 후보 검토 이력을 저장
+- `POST /api/match-candidate/<match_id>/apply` : 승인된 AI 후보를 실제 1:1 비교쌍에 반영
+  - 대상 `change_atom`의 3주기/4주기 원문 링크와 유사도를 갱신하고, 같은 원문을 물고 있던 충돌 항목은 중복을 풀어 `needs_review`로 돌림
+  - 기존 후보 등록 이력(`applied_at`)과 실제 매칭 적용 이력(`mapping_applied_at`)은 분리해 저장
+- `POST /api/match-candidate/<match_id>/promote-composite` : AI 1:1 후보와 충돌 항목을 복합 후보로 승격
+  - 한 원문이 복수 항목과 연결되는 경우 `composite_match_candidate`에 별도 후보로 등록
 - `POST /api/change/<change_id>/note` : 검토 메모 추가
   - 관리자는 일반 메모(`note`), 부서 담당자는 부서 의견(`department_note`)으로 감사로그에 저장
 - `GET /api/change/<change_id>/history` : 검토 이력 조회 (`review_log`)

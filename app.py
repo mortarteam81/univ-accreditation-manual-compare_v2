@@ -20,9 +20,16 @@ from flask import Flask, render_template, jsonify, request, session, redirect, u
 
 from ai_service import ask_ai
 from composite_matching import (
+    Source,
+    build_record,
+    composite_score,
     ensure_composite_match_tables,
+    insert_links,
+    insert_records,
     json_dumps,
+    load_change_links,
     load_composite_candidates_for_change,
+    load_sources,
 )
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -423,6 +430,53 @@ def ensure_column(conn, table, column, definition):
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def table_exists(conn, table):
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return bool(row)
+
+
+def ensure_match_candidate_action_tables(conn):
+    if table_exists(conn, "global_match_candidate"):
+        ensure_column(conn, "global_match_candidate", "review_status", "TEXT DEFAULT 'candidate'")
+        ensure_column(conn, "global_match_candidate", "decision_note", "TEXT")
+        ensure_column(conn, "global_match_candidate", "reviewed_by_user_id", "INTEGER")
+        ensure_column(conn, "global_match_candidate", "reviewed_by_email", "TEXT")
+        ensure_column(conn, "global_match_candidate", "reviewed_at", "TEXT")
+        ensure_column(conn, "global_match_candidate", "applied_by_user_id", "INTEGER")
+        ensure_column(conn, "global_match_candidate", "applied_by_email", "TEXT")
+        ensure_column(conn, "global_match_candidate", "applied_at", "TEXT")
+        ensure_column(conn, "global_match_candidate", "mapping_applied_by_user_id", "INTEGER")
+        ensure_column(conn, "global_match_candidate", "mapping_applied_by_email", "TEXT")
+        ensure_column(conn, "global_match_candidate", "mapping_applied_at", "TEXT")
+        ensure_column(conn, "global_match_candidate", "promoted_composite_id", "TEXT")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS match_candidate_log (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            note TEXT,
+            related_change_ids TEXT,
+            conflict_change_ids TEXT,
+            promoted_composite_id TEXT,
+            actor_user_id INTEGER,
+            actor_email TEXT,
+            actor_role TEXT,
+            actor_department TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_match_candidate_log_match ON match_candidate_log(match_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_match_candidate_log_created ON match_candidate_log(created_at)")
+
+
 def init_extra_tables():
     conn = get_db()
 
@@ -523,6 +577,7 @@ def init_extra_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_department ON users(department)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_oidc_subject ON users(oidc_subject)")
     ensure_composite_match_tables(conn)
+    ensure_match_candidate_action_tables(conn)
 
     # 체크리스트 항목별 제출 상태
     conn.execute("""
@@ -1548,6 +1603,97 @@ def api_change_status_summary():
     return jsonify({r["status"]: r["cnt"] for r in rows})
 
 
+def source_preview(conn, source_id):
+    if not source_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT source_id, cycle, criterion, title, section_type, field_name, content
+        FROM canonical_source
+        WHERE source_id = ?
+        """,
+        (source_id,),
+    ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    content = item.get("content") or ""
+    item["content_preview"] = content[:180] + ("..." if len(content) > 180 else "")
+    item.pop("content", None)
+    return item
+
+
+def source_conflict_changes(conn, source_id, exclude_change_id=None):
+    if not source_id:
+        return []
+    rows = conn.execute(
+        """
+        SELECT change_id, source_id_3, source_id_4, cycle3_criterion, cycle3_title,
+               cycle4_criterion, cycle4_title, section_type, change_type,
+               similarity, verification_status, source_text_3, source_text_4
+        FROM change_atom
+        WHERE (source_id_3 = ? OR source_id_4 = ?)
+          AND (? IS NULL OR change_id <> ?)
+        ORDER BY change_id
+        """,
+        (source_id, source_id, exclude_change_id, exclude_change_id),
+    ).fetchall()
+    conflicts = []
+    for row in rows:
+        item = dict(row)
+        for key in ("source_text_3", "source_text_4"):
+            text = item.get(key) or ""
+            item[f"{key}_preview"] = text[:140] + ("..." if len(text) > 140 else "")
+            item.pop(key, None)
+        conflicts.append(item)
+    return conflicts
+
+
+def related_change_ids_for_match(conn, row):
+    change_ids = {row["change_id"]}
+    for source_id in (row["query_source_id"], row["candidate_source_id"]):
+        if not source_id:
+            continue
+        rows = conn.execute(
+            """
+            SELECT change_id
+            FROM change_atom
+            WHERE source_id_3 = ? OR source_id_4 = ?
+            """,
+            (source_id, source_id),
+        ).fetchall()
+        change_ids.update(item["change_id"] for item in rows)
+    return sorted(change_ids)
+
+
+def load_match_candidates_for_change(conn, change_id, limit=3):
+    ensure_match_candidate_action_tables(conn)
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM global_match_candidate
+        WHERE change_id = ?
+          AND rank <= ?
+        ORDER BY rank, score DESC, match_id
+        """,
+        (change_id, limit),
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        item = dict(row)
+        item["review_status"] = item.get("review_status") or "candidate"
+        item["query_source"] = source_preview(conn, item.get("query_source_id"))
+        item["candidate_source"] = source_preview(conn, item.get("candidate_source_id"))
+        item["conflict_changes"] = source_conflict_changes(
+            conn,
+            item.get("candidate_source_id"),
+            exclude_change_id=change_id,
+        )
+        item["related_change_ids"] = related_change_ids_for_match(conn, row)
+        candidates.append(item)
+    return candidates
+
+
 @app.route("/api/change/<change_id>")
 def api_change_detail(change_id):
     """변경사항 상세 + 매칭 후보"""
@@ -1565,12 +1711,8 @@ def api_change_detail(change_id):
     if not change:
         return jsonify({"error": "not found"}), 404
 
-    # 관련 매칭 후보
-    candidates = query_all(
-        "SELECT * FROM v_top_match_candidates WHERE change_id = ?",
-        (change_id,),
-    )
     conn = get_db()
+    candidates = load_match_candidates_for_change(conn, change_id)
     composite_candidates = load_composite_candidates_for_change(conn, change_id)
     conn.close()
 
@@ -1619,6 +1761,417 @@ CHANGE_REVIEW_STATUS_MAP = {
 }
 
 COMPOSITE_REVIEW_STATUSES = {"candidate", "approved", "rejected", "needs_review"}
+MATCH_CANDIDATE_REVIEW_STATUSES = {"candidate", "approved", "rejected", "needs_review"}
+
+
+def match_candidate_audit_log(
+    conn,
+    match_id,
+    action,
+    old_status,
+    new_status,
+    note,
+    related_change_ids,
+    conflict_change_ids,
+    user,
+    promoted_composite_id=None,
+):
+    audit = audit_context(user)
+    conn.execute("""
+        INSERT INTO match_candidate_log (
+            match_id, action, old_status, new_status, note, related_change_ids,
+            conflict_change_ids, promoted_composite_id,
+            actor_user_id, actor_email, actor_role, actor_department,
+            ip_address, user_agent, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        match_id,
+        action,
+        old_status,
+        new_status,
+        note,
+        json_dumps(related_change_ids or []),
+        json_dumps(conflict_change_ids or []),
+        promoted_composite_id,
+        audit["actor_user_id"],
+        audit["actor_email"],
+        audit["actor_role"],
+        audit["actor_department"],
+        audit["ip_address"],
+        audit["user_agent"],
+        now_iso(),
+    ))
+
+
+def get_match_candidate_row(conn, match_id):
+    ensure_match_candidate_action_tables(conn)
+    return conn.execute(
+        "SELECT * FROM global_match_candidate WHERE match_id = ?",
+        (match_id,),
+    ).fetchone()
+
+
+def match_candidate_note(row, action_note="", conflict_change_ids=None):
+    query = row["query_source_id"] or "-"
+    candidate = row["candidate_source_id"] or "-"
+    score = row["score"] if row["score"] is not None else 0
+    reason = row["match_reason"] or ""
+    conflict_label = ", ".join(conflict_change_ids or []) or "없음"
+    note = (
+        f"[AI 매칭 후보 반영] 후보 {row['match_id']}를 교체 검토 대상으로 등록했습니다. "
+        f"기준 원문 {query}, 후보 원문 {candidate}, 점수 {float(score):.3f}. "
+        f"충돌 가능 항목: {conflict_label}. {reason}"
+    )
+    action_note = (action_note or "").strip()
+    return f"{note} 관리자 의견: {action_note}" if action_note else note
+
+
+def canonical_source_row(conn, source_id):
+    if not source_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT source_id, cycle, criterion, title, section_type, section_label,
+               field_name, item_path, content
+        FROM canonical_source
+        WHERE source_id = ?
+        """,
+        (source_id,),
+    ).fetchone()
+    return row
+
+
+def change_pair_label(row):
+    if not row:
+        return "- ↔ -"
+    return f"{row['source_id_3'] or '-'} ↔ {row['source_id_4'] or '-'}"
+
+
+def match_change_type(source3, source4, similarity):
+    if source3 and source4:
+        return "유지" if similarity is not None and float(similarity) >= 0.98 else "변경"
+    if source4:
+        return "신설후보"
+    if source3:
+        return "삭제/이동후보"
+    return "변경"
+
+
+def match_similarity(row):
+    if row["difflib_similarity"] is not None:
+        return float(row["difflib_similarity"])
+    if row["score"] is not None:
+        return float(row["score"])
+    return None
+
+
+def source_update_tuple(source3, source4, similarity):
+    return (
+        source3["source_id"] if source3 else None,
+        source3["content"] if source3 else None,
+        source3["criterion"] if source3 else None,
+        source3["title"] if source3 else None,
+        source4["source_id"] if source4 else None,
+        source4["content"] if source4 else None,
+        source4["criterion"] if source4 else None,
+        source4["title"] if source4 else None,
+        source4["field_name"] if source4 else None,
+        source4["item_path"] if source4 else None,
+        (source4 or source3)["section_type"] if (source4 or source3) else None,
+        (source4 or source3)["section_label"] if (source4 or source3) else None,
+        similarity,
+        match_change_type(source3, source4, similarity),
+    )
+
+
+def candidate_target_change(conn, row, query):
+    target = conn.execute(
+        "SELECT * FROM change_atom WHERE change_id = ?",
+        (row["change_id"],),
+    ).fetchone()
+    if target:
+        return target
+    side_column = "source_id_4" if str(query["cycle"]) == "4" else "source_id_3"
+    return conn.execute(
+        f"SELECT * FROM change_atom WHERE {side_column} = ? ORDER BY change_id LIMIT 1",
+        (query["source_id"],),
+    ).fetchone()
+
+
+def write_match_review_log(conn, change_id, action, old_status, new_status, note, user, now):
+    audit = audit_context(user)
+    conn.execute("""
+        INSERT INTO review_log (
+            change_id, action, old_status, new_status, note, reviewer,
+            actor_user_id, actor_email, actor_role, actor_department,
+            ip_address, user_agent, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        change_id,
+        action,
+        old_status,
+        new_status,
+        note,
+        audit["actor_email"],
+        audit["actor_user_id"],
+        audit["actor_email"],
+        audit["actor_role"],
+        audit["actor_department"],
+        audit["ip_address"],
+        audit["user_agent"],
+        now,
+    ))
+
+
+def apply_match_candidate_mapping(conn, row, user, note):
+    """AI 후보를 실제 change_atom 1:1 비교쌍에 반영한다."""
+    query = canonical_source_row(conn, row["query_source_id"])
+    candidate = canonical_source_row(conn, row["candidate_source_id"])
+    if not query or not candidate:
+        return None, "source not found"
+    if str(query["cycle"]) == str(candidate["cycle"]):
+        return None, "candidate must connect different cycles"
+
+    target = candidate_target_change(conn, row, query)
+    if not target:
+        return None, "target change not found"
+
+    query_cycle = str(query["cycle"])
+    candidate_cycle = str(candidate["cycle"])
+    if query_cycle == "4" and candidate_cycle == "3":
+        source3, source4 = candidate, query
+        detach_column = "source_id_3"
+        detach_side = "3"
+    elif query_cycle == "3" and candidate_cycle == "4":
+        source3, source4 = query, candidate
+        detach_column = "source_id_4"
+        detach_side = "4"
+    else:
+        return None, "unsupported candidate direction"
+
+    now = now_iso()
+    similarity = match_similarity(row)
+    old_target_pair = change_pair_label(target)
+    new_target_pair = f"{source3['source_id']} ↔ {source4['source_id']}"
+    new_status = "needs_review"
+    review_reason = (
+        f"AI 후보 실제 매칭 적용({row['match_id']}): "
+        f"{old_target_pair} -> {new_target_pair}"
+    )
+    update_values = source_update_tuple(source3, source4, similarity) + (
+        new_status,
+        CHANGE_REVIEW_STATUS_MAP[new_status],
+        review_reason,
+        target["change_id"],
+    )
+    conn.execute("""
+        UPDATE change_atom
+        SET source_id_3 = ?,
+            source_text_3 = ?,
+            cycle3_criterion = ?,
+            cycle3_title = ?,
+            source_id_4 = ?,
+            source_text_4 = ?,
+            cycle4_criterion = ?,
+            cycle4_title = ?,
+            field_name_4 = ?,
+            item_path_4 = ?,
+            section_type = ?,
+            section_label = ?,
+            similarity = ?,
+            change_type = ?,
+            verification_status = ?,
+            human_review_status = ?,
+            manual_review_required = 1,
+            review_reason = ?,
+            global_match_status = 'strong_candidate'
+        WHERE change_id = ?
+    """, update_values)
+
+    sim_label = f"{similarity:.3f}" if similarity is not None else "-"
+    target_note = (
+        f"[AI 매칭 실제 적용] 후보 {row['match_id']}를 실제 비교쌍으로 반영했습니다. "
+        f"기존 매칭 {old_target_pair}, 신규 매칭 {new_target_pair}, "
+        f"유사도 {sim_label}. "
+        f"관리자 의견: {note or '없음'}"
+    )
+    write_match_review_log(
+        conn,
+        target["change_id"],
+        "ai_match_candidate",
+        target["verification_status"],
+        new_status,
+        target_note,
+        user,
+        now,
+    )
+
+    detached = []
+    conflict_rows = conn.execute(
+        f"""
+        SELECT *
+        FROM change_atom
+        WHERE {detach_column} = ?
+          AND change_id <> ?
+        ORDER BY change_id
+        """,
+        (candidate["source_id"], target["change_id"]),
+    ).fetchall()
+    for conflict in conflict_rows:
+        old_pair = change_pair_label(conflict)
+        if detach_side == "3":
+            remaining3 = None
+            remaining4 = canonical_source_row(conn, conflict["source_id_4"]) if conflict["source_id_4"] else None
+        else:
+            remaining3 = canonical_source_row(conn, conflict["source_id_3"]) if conflict["source_id_3"] else None
+            remaining4 = None
+        conflict_values = source_update_tuple(remaining3, remaining4, None) + (
+            new_status,
+            CHANGE_REVIEW_STATUS_MAP[new_status],
+            (
+                f"AI 후보 실제 매칭 적용({row['match_id']})으로 "
+                f"{candidate['source_id']}를 {target['change_id']}에 재배정했습니다."
+            ),
+            conflict["change_id"],
+        )
+        conn.execute("""
+            UPDATE change_atom
+            SET source_id_3 = ?,
+                source_text_3 = ?,
+                cycle3_criterion = ?,
+                cycle3_title = ?,
+                source_id_4 = ?,
+                source_text_4 = ?,
+                cycle4_criterion = ?,
+                cycle4_title = ?,
+                field_name_4 = ?,
+                item_path_4 = ?,
+                section_type = ?,
+                section_label = ?,
+                similarity = ?,
+                change_type = ?,
+                verification_status = ?,
+                human_review_status = ?,
+                manual_review_required = 1,
+                review_reason = ?,
+                global_match_status = 'possible_candidate'
+            WHERE change_id = ?
+        """, conflict_values)
+        new_pair = (
+            f"{remaining3['source_id'] if remaining3 else '-'} ↔ "
+            f"{remaining4['source_id'] if remaining4 else '-'}"
+        )
+        detach_note = (
+            f"[AI 매칭 실제 적용] 후보 {row['match_id']} 적용으로 중복 매칭을 정리했습니다. "
+            f"기존 매칭 {old_pair}, 조정 후 {new_pair}. "
+            f"{candidate['source_id']}는 {target['change_id']}에 재배정되었습니다."
+        )
+        write_match_review_log(
+            conn,
+            conflict["change_id"],
+            "ai_match_candidate",
+            conflict["verification_status"],
+            new_status,
+            detach_note,
+            user,
+            now,
+        )
+        detached.append({
+            "change_id": conflict["change_id"],
+            "old_pair": old_pair,
+            "new_pair": new_pair,
+        })
+
+    conn.execute("""
+        UPDATE global_match_candidate
+        SET applied_by_user_id = COALESCE(applied_by_user_id, ?),
+            applied_by_email = COALESCE(applied_by_email, ?),
+            applied_at = COALESCE(applied_at, ?),
+            mapping_applied_by_user_id = ?,
+            mapping_applied_by_email = ?,
+            mapping_applied_at = ?
+        WHERE match_id = ?
+    """, (
+        user["user_id"],
+        user["email"],
+        now,
+        user["user_id"],
+        user["email"],
+        now,
+        row["match_id"],
+    ))
+    return {
+        "change_id": target["change_id"],
+        "old_pair": old_target_pair,
+        "new_pair": new_target_pair,
+        "similarity": similarity,
+        "detached": detached,
+    }, None
+
+
+def source_ids_for_match_candidate_composite(conn, row):
+    sources = load_sources(conn)
+    query = sources.get(row["query_source_id"])
+    candidate = sources.get(row["candidate_source_id"])
+    if not query or not candidate:
+        return None, None, "source not found"
+    if query.cycle == candidate.cycle:
+        return None, None, "candidate must connect different cycles"
+    if query.section_type != candidate.section_type:
+        return None, None, "candidate must use the same section type"
+    if query.field_name and candidate.field_name and query.field_name != candidate.field_name:
+        return None, None, "candidate must use the same field"
+
+    conflict_rows = conn.execute(
+        """
+        SELECT change_id, source_id_3, source_id_4
+        FROM change_atom
+        WHERE (source_id_3 = ? OR source_id_4 = ?)
+          AND change_id <> ?
+        """,
+        (candidate.source_id, candidate.source_id, row["change_id"]),
+    ).fetchall()
+    opposite_ids = {query.source_id}
+    for conflict in conflict_rows:
+        if candidate.cycle == "3" and conflict["source_id_4"]:
+            opposite_ids.add(conflict["source_id_4"])
+        elif candidate.cycle == "4" and conflict["source_id_3"]:
+            opposite_ids.add(conflict["source_id_3"])
+    if len(opposite_ids) < 2:
+        return None, None, "no conflicting paired source to promote"
+
+    if candidate.cycle == "3":
+        direction = "one_to_many"
+        query_sources = [candidate]
+        candidate_sources = sorted(
+            [sources[source_id] for source_id in opposite_ids if source_id in sources],
+            key=lambda source: source.source_id,
+        )
+    else:
+        direction = "many_to_one"
+        query_sources = [candidate]
+        candidate_sources = sorted(
+            [sources[source_id] for source_id in opposite_ids if source_id in sources],
+            key=lambda source: source.source_id,
+        )
+    return direction, (query_sources, candidate_sources), ""
+
+
+def edge_lookup_from_global_candidates(conn):
+    rows = conn.execute(
+        """
+        SELECT query_source_id, candidate_source_id, score
+        FROM global_match_candidate
+        WHERE query_source_id IS NOT NULL
+          AND candidate_source_id IS NOT NULL
+        """
+    ).fetchall()
+    return {
+        (row["query_source_id"], row["candidate_source_id"]): float(row["score"] or 0)
+        for row in rows
+    }
 
 
 def composite_audit_log(conn, composite_id, action, old_status, new_status, note, related_change_ids, user):
@@ -1679,6 +2232,213 @@ def composite_status_note(row, action_note=""):
     )
     action_note = (action_note or "").strip()
     return f"{note} 관리자 의견: {action_note}" if action_note else note
+
+
+@app.route("/api/match-candidate/<match_id>/review", methods=["PATCH"])
+@admin_required
+def api_review_match_candidate(match_id):
+    """AI 1:1 매칭 후보 승인/반려/재검토 상태를 저장한다."""
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get("review_status") or "").strip()
+    note = (data.get("note") or "").strip()
+    if new_status not in MATCH_CANDIDATE_REVIEW_STATUSES:
+        return jsonify({"error": "invalid match candidate review status"}), 400
+
+    conn = get_db()
+    row = get_match_candidate_row(conn, match_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "match candidate not found"}), 404
+    old_status = row["review_status"] or "candidate"
+    related_change_ids = related_change_ids_for_match(conn, row)
+    conflict_change_ids = [
+        item["change_id"]
+        for item in source_conflict_changes(conn, row["candidate_source_id"], row["change_id"])
+    ]
+    now = now_iso()
+    conn.execute("""
+        UPDATE global_match_candidate
+        SET review_status = ?,
+            decision_note = ?,
+            reviewed_by_user_id = ?,
+            reviewed_by_email = ?,
+            reviewed_at = ?
+        WHERE match_id = ?
+    """, (new_status, note, user["user_id"], user["email"], now, match_id))
+    match_candidate_audit_log(
+        conn,
+        match_id,
+        "review_status_change",
+        old_status,
+        new_status,
+        note,
+        related_change_ids,
+        conflict_change_ids,
+        user,
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "match_id": match_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "related_change_ids": related_change_ids,
+        "conflict_change_ids": conflict_change_ids,
+    })
+
+
+@app.route("/api/match-candidate/<match_id>/apply", methods=["POST"])
+@admin_required
+def api_apply_match_candidate(match_id):
+    """승인된 AI 후보를 실제 change_atom 비교쌍에 반영한다."""
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    note = (data.get("note") or "").strip()
+
+    conn = get_db()
+    row = get_match_candidate_row(conn, match_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "match candidate not found"}), 404
+    if row["review_status"] != "approved":
+        conn.close()
+        return jsonify({"error": "approve match candidate before applying"}), 400
+    if row["mapping_applied_at"]:
+        related_change_ids = related_change_ids_for_match(conn, row)
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "match_id": match_id,
+            "already_applied": True,
+            "changed": [],
+            "noted": [],
+            "mapping": None,
+            "related_change_ids": related_change_ids,
+        })
+
+    related_change_ids = related_change_ids_for_match(conn, row)
+    conflict_change_ids = [
+            item["change_id"]
+            for item in source_conflict_changes(conn, row["candidate_source_id"], row["change_id"])
+    ]
+    mapping, error = apply_match_candidate_mapping(conn, row, user, note)
+    if error:
+        conn.close()
+        return jsonify({"error": error}), 400
+
+    match_candidate_audit_log(
+        conn,
+        match_id,
+        "apply_mapping",
+        row["review_status"],
+        row["review_status"],
+        match_candidate_note(row, note, conflict_change_ids),
+        related_change_ids,
+        conflict_change_ids,
+        user,
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "match_id": match_id,
+        "changed": [mapping] if mapping else [],
+        "noted": [],
+        "mapping": mapping,
+        "related_change_ids": related_change_ids,
+        "conflict_change_ids": conflict_change_ids,
+    })
+
+
+@app.route("/api/match-candidate/<match_id>/promote-composite", methods=["POST"])
+@admin_required
+def api_promote_match_candidate_to_composite(match_id):
+    """AI 1:1 후보와 충돌 항목을 복합 매칭 후보로 승격한다."""
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    note = (data.get("note") or "").strip()
+    conn = get_db()
+    row = get_match_candidate_row(conn, match_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "match candidate not found"}), 404
+    if row["promoted_composite_id"]:
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "match_id": match_id,
+            "already_promoted": True,
+            "composite_id": row["promoted_composite_id"],
+        })
+
+    direction, source_pair, error = source_ids_for_match_candidate_composite(conn, row)
+    if error:
+        conn.close()
+        return jsonify({"error": error}), 400
+    query_sources, candidate_sources = source_pair
+    source_to_changes, _change_to_sources = load_change_links(conn)
+    metrics = composite_score(query_sources, candidate_sources, edge_lookup_from_global_candidates(conn))
+    record = build_record(
+        direction,
+        query_sources,
+        candidate_sources,
+        metrics,
+        source_to_changes,
+        "AI 후보 승격 복합 후보",
+    )
+    existing = conn.execute(
+        "SELECT composite_id FROM composite_match_candidate WHERE composite_id = ?",
+        (record["composite_id"],),
+    ).fetchone()
+    if not existing:
+        insert_records(conn, [record])
+        insert_links(conn, [record], source_to_changes)
+
+    related_change_ids = related_change_ids_for_match(conn, row)
+    conflict_change_ids = [
+        item["change_id"]
+        for item in source_conflict_changes(conn, row["candidate_source_id"], row["change_id"])
+    ]
+    now = now_iso()
+    conn.execute("""
+        UPDATE global_match_candidate
+        SET promoted_composite_id = ?
+        WHERE match_id = ?
+    """, (record["composite_id"], match_id))
+    composite_audit_log(
+        conn,
+        record["composite_id"],
+        "promoted_from_ai_candidate",
+        None,
+        "candidate",
+        note,
+        sorted(set(related_change_ids) | set(conflict_change_ids)),
+        user,
+    )
+    match_candidate_audit_log(
+        conn,
+        match_id,
+        "promote_composite",
+        row["review_status"] or "candidate",
+        row["review_status"] or "candidate",
+        note,
+        related_change_ids,
+        conflict_change_ids,
+        user,
+        promoted_composite_id=record["composite_id"],
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "match_id": match_id,
+        "composite_id": record["composite_id"],
+        "already_promoted": bool(existing),
+        "related_change_ids": related_change_ids,
+        "conflict_change_ids": conflict_change_ids,
+    })
 
 
 @app.route("/api/change/<change_id>/status", methods=["PATCH"])
