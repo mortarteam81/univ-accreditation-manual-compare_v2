@@ -270,6 +270,72 @@ function truncate(s, n=80) {
   return escapeHtml(text);
 }
 
+function compositeDirectionLabel(direction) {
+  const labels = {
+    many_to_one: '통합/재구성 후보',
+    one_to_many: '분리/재배치 후보',
+    many_to_many: '복수 준거 재구성 후보'
+  };
+  return labels[direction] || '복합 매칭 후보';
+}
+
+function compositeStatusLabel(status) {
+  const labels = {
+    candidate: ['후보', 'candidate'],
+    approved: ['승인', 'approved'],
+    rejected: ['반려', 'rejected'],
+    needs_review: ['재검토', 'needs-review']
+  };
+  const [label, cls] = labels[status || 'candidate'] || labels.candidate;
+  return `<span class="composite-status ${cls}">${label}</span>`;
+}
+
+function compositeSourceList(sources) {
+  if (!sources || !sources.length) return '<span class="composite-empty">원문 없음</span>';
+  return sources.map(s => `
+    <div class="composite-source">
+      <div class="composite-source-title">${escapeHtml(s.cycle || '')}주기 ${escapeHtml(s.criterion || '')} ${escapeHtml(s.title || '')}</div>
+      <div class="composite-source-meta">${escapeHtml(s.source_id || '')}</div>
+      <div class="composite-source-preview">${escapeHtml(s.content_preview || '')}</div>
+    </div>
+  `).join('');
+}
+
+function assignmentTypeLabel(type) {
+  const labels = {
+    primary: ['주 귀속', 'primary'],
+    shared_evidence: ['공통 근거', 'shared'],
+    moved_or_split_candidate: ['이동/분할 후보', 'split'],
+    secondary: ['보조 연결', 'secondary']
+  };
+  return labels[type || 'primary'] || labels.primary;
+}
+
+function assignmentBreakdownHtml(items) {
+  if (!items || !items.length) return '';
+  return `<div class="assignment-breakdown">
+    <div class="assignment-title">항목별 귀속 판단</div>
+    <div class="assignment-list">
+      ${items.map(item => {
+        const [label, cls] = assignmentTypeLabel(item.assignment_type);
+        const tags = (item.concept_tags || []).map(tag => `<span>${escapeHtml(tag)}</span>`).join('');
+        return `<div class="assignment-item">
+          <div class="assignment-head">
+            <span class="assignment-badge ${cls}">${label}</span>
+            <span class="assignment-source">${escapeHtml(item.source_label || item.source_id || '')}</span>
+          </div>
+          <div class="assignment-target">
+            <strong>주 귀속</strong> ${escapeHtml(item.primary_target || '미정')}
+            ${item.secondary_target ? `<span><strong>보조 연결</strong> ${escapeHtml(item.secondary_target)}</span>` : ''}
+          </div>
+          ${tags ? `<div class="assignment-tags">${tags}</div>` : ''}
+          <div class="assignment-reason">${escapeHtml(item.assignment_reason || '')}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+
 function tokenizeDiffText(value) {
   return String(value || '').match(/\s+|[가-힣]+|[A-Za-z0-9]+|[^\s가-힣A-Za-z0-9]/g) || [];
 }
@@ -390,6 +456,7 @@ async function openDetail(changeId) {
 
   const c = detail.change;
   const mc = detail.match_candidates || [];
+  const compositeCandidates = detail.composite_candidates || [];
   const acts = detail.department_actions || [];
   const sim = c.similarity ? `${(c.similarity*100).toFixed(0)}%` : '—';
 
@@ -402,6 +469,48 @@ async function openDetail(changeId) {
         <span class="match-id">${m.candidate_source_id || ''}</span>
         <span class="match-text">${truncate(m.candidate_text, 120)}</span>
       </div>`).join('') + '</div></div>';
+  }
+
+  let compositeHtml = '';
+  if (compositeCandidates.length) {
+    compositeHtml = `<div class="detail-section composite-section"><h4>🧩 복합 매칭 후보</h4><div class="composite-list">` +
+      compositeCandidates.map(cc => {
+        const score = cc.score ? `${(cc.score * 100).toFixed(0)}%` : '—';
+        const coverage = cc.coverage_score ? `${(cc.coverage_score * 100).toFixed(0)}%` : '—';
+        const isApproved = cc.review_status === 'approved';
+        const isApplied = Boolean(cc.applied_at);
+        return `<div class="composite-card">
+          <div class="composite-card-head">
+            <span class="composite-type">${compositeDirectionLabel(cc.direction)}</span>
+            ${compositeStatusLabel(cc.review_status)}
+            <span class="composite-score">종합 ${score}</span>
+            <span class="composite-score">커버 ${coverage}</span>
+            ${cc.applied_at ? `<span class="composite-applied">반영됨 ${escapeHtml(cc.applied_at.slice(0,16).replace('T',' '))}</span>` : ''}
+          </div>
+          <div class="composite-grid">
+            <div>
+              <div class="composite-grid-label">기준 원문</div>
+              ${compositeSourceList(cc.query_sources)}
+            </div>
+            <div>
+              <div class="composite-grid-label">복합 대응 후보</div>
+              ${compositeSourceList(cc.candidate_sources)}
+            </div>
+          </div>
+          <div class="composite-reason">${escapeHtml(cc.evidence_reason || '')}</div>
+          ${assignmentBreakdownHtml(cc.assignment_breakdown)}
+          ${cc.decision_note ? `<div class="composite-note">검토 메모: ${escapeHtml(cc.decision_note)}</div>` : ''}
+          ${canManageReview ? `
+          <div class="composite-actions">
+            <button class="btn-composite approve" onclick="setCompositeStatus('${cc.composite_id}', 'approved', '${c.change_id}')">승인</button>
+            <button class="btn-composite reject" onclick="setCompositeStatus('${cc.composite_id}', 'rejected', '${c.change_id}')">반려</button>
+            <button class="btn-composite review" onclick="setCompositeStatus('${cc.composite_id}', 'needs_review', '${c.change_id}')">재검토</button>
+            <button class="btn-composite apply" onclick="applyComposite('${cc.composite_id}', '${c.change_id}')" ${isApproved && !isApplied ? '' : 'disabled'}>${isApplied ? '반영 완료' : '관련 항목 반영'}</button>
+          </div>
+          ` : ''}
+          <div class="composite-id">${escapeHtml(cc.composite_id || '')}</div>
+        </div>`;
+      }).join('') + '</div></div>';
   }
 
   let actHtml = '';
@@ -419,7 +528,7 @@ async function openDetail(changeId) {
     historyHtml = `<div class="detail-section"><h4>📜 검토 이력</h4><div class="history-list">` +
       history.map(h => {
         const actor = h.actor_email || h.reviewer || 'user';
-        const actionLabel = h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : (h.action === 'department_note' ? '부서 의견' : '메모');
+        const actionLabel = h.action === 'status_change' ? `${h.old_status} → ${h.new_status}` : (h.action === 'department_note' ? '부서 의견' : (h.action === 'composite_match' ? '복합 매칭' : '메모'));
         return `<div class="history-item">
         <span class="history-time">${h.created_at?.slice(0,16).replace('T',' ')}</span>
         <span class="history-action">${actionLabel}</span>
@@ -458,6 +567,7 @@ async function openDetail(changeId) {
     </div>
 
     ${matchHtml}
+    ${compositeHtml}
     ${actHtml}
 
     ${canManageReview ? `
@@ -535,6 +645,51 @@ async function addNote(changeId) {
     showToast('메모 저장 완료');
     openDetail(changeId);
     loadChanges();
+  }
+}
+
+async function setCompositeStatus(compositeId, reviewStatus, changeId) {
+  const notes = {
+    approved: '복합 매칭 후보를 2차 검수 대상으로 승인합니다.',
+    rejected: '복합 매칭 후보를 현재 검토 기준에서 반려합니다.',
+    needs_review: '복합 매칭 후보는 추가 확인이 필요합니다.',
+    candidate: '복합 매칭 후보 상태로 되돌립니다.'
+  };
+  const res = await fetch(`/api/composite/${compositeId}/review`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      review_status: reviewStatus,
+      note: notes[reviewStatus] || ''
+    })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    showToast('복합 후보 검토 상태 저장 완료');
+    openDetail(changeId);
+  } else {
+    showToast(`오류: ${d.error}`, true);
+  }
+}
+
+async function applyComposite(compositeId, changeId) {
+  const res = await fetch(`/api/composite/${compositeId}/apply`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+    body: JSON.stringify({
+      note: '복합 매칭 승인 결과를 관련 항목 검토 큐와 업무 메모에 반영합니다.'
+    })
+  });
+  const d = await res.json();
+  if (d.ok) {
+    const message = d.already_applied
+      ? '이미 반영된 복합 후보입니다'
+      : `복합 후보 반영 완료 · 상태변경 ${d.changed.length}건`;
+    showToast(message);
+    openDetail(changeId);
+    loadChanges();
+  } else {
+    showToast(`오류: ${d.error}`, true);
   }
 }
 

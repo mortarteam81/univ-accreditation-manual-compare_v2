@@ -19,6 +19,11 @@ from urllib.parse import urlparse
 from flask import Flask, render_template, jsonify, request, session, redirect, url_for, send_file
 
 from ai_service import ask_ai
+from composite_matching import (
+    ensure_composite_match_tables,
+    json_dumps,
+    load_composite_candidates_for_change,
+)
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -517,6 +522,7 @@ def init_extra_tables():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_department ON users(department)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_users_oidc_subject ON users(oidc_subject)")
+    ensure_composite_match_tables(conn)
 
     # 체크리스트 항목별 제출 상태
     conn.execute("""
@@ -1564,6 +1570,9 @@ def api_change_detail(change_id):
         "SELECT * FROM v_top_match_candidates WHERE change_id = ?",
         (change_id,),
     )
+    conn = get_db()
+    composite_candidates = load_composite_candidates_for_change(conn, change_id)
+    conn.close()
 
     # 관련 부서 조치사항
     actions = query_all(
@@ -1574,6 +1583,7 @@ def api_change_detail(change_id):
     return jsonify({
         "change": change,
         "match_candidates": candidates,
+        "composite_candidates": composite_candidates,
         "department_actions": actions,
     })
 
@@ -1600,6 +1610,76 @@ def api_risk_heatmap():
 
 
 # ─── 검토 워크플로우 API ─────────────────────────────────
+
+CHANGE_REVIEW_STATUS_MAP = {
+    "confirmed": "approved",
+    "rejected": "rejected",
+    "needs_review": "pending",
+    "deferred": "deferred",
+}
+
+COMPOSITE_REVIEW_STATUSES = {"candidate", "approved", "rejected", "needs_review"}
+
+
+def composite_audit_log(conn, composite_id, action, old_status, new_status, note, related_change_ids, user):
+    audit = audit_context(user)
+    conn.execute("""
+        INSERT INTO composite_match_log (
+            composite_id, action, old_status, new_status, note, related_change_ids,
+            actor_user_id, actor_email, actor_role, actor_department,
+            ip_address, user_agent, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        composite_id,
+        action,
+        old_status,
+        new_status,
+        note,
+        json_dumps(related_change_ids or []),
+        audit["actor_user_id"],
+        audit["actor_email"],
+        audit["actor_role"],
+        audit["actor_department"],
+        audit["ip_address"],
+        audit["user_agent"],
+        now_iso(),
+    ))
+
+
+def get_composite_row(conn, composite_id):
+    return conn.execute(
+        "SELECT * FROM composite_match_candidate WHERE composite_id = ?",
+        (composite_id,),
+    ).fetchone()
+
+
+def get_composite_change_ids(conn, composite_id):
+    rows = conn.execute(
+        """
+        SELECT DISTINCT change_id
+        FROM composite_match_link
+        WHERE composite_id = ?
+        ORDER BY change_id
+        """,
+        (composite_id,),
+    ).fetchall()
+    return [row["change_id"] for row in rows]
+
+
+def composite_status_note(row, action_note=""):
+    label = {
+        "many_to_one": "통합/재구성",
+        "one_to_many": "분리/재배치",
+        "many_to_many": "복수 준거 재구성",
+    }.get(row["direction"], "복합 매칭")
+    note = (
+        f"[복합 매칭 반영] {label} 후보 {row['composite_id']}가 승인되어 "
+        f"관련 항목을 2차 검수 대상으로 정리했습니다. {row['evidence_reason'] or ''}"
+    )
+    action_note = (action_note or "").strip()
+    return f"{note} 관리자 의견: {action_note}" if action_note else note
+
 
 @app.route("/api/change/<change_id>/status", methods=["PATCH"])
 @admin_required
@@ -1633,18 +1713,12 @@ def api_update_status(change_id):
     audit = audit_context(user)
 
     # 상태 업데이트
-    review_status_map = {
-        "confirmed": "approved",
-        "rejected": "rejected",
-        "needs_review": "pending",
-        "deferred": "deferred",
-    }
     conn.execute("""
         UPDATE change_atom
         SET verification_status = ?,
             human_review_status = ?
         WHERE change_id = ?
-    """, (new_status, review_status_map[new_status], change_id))
+    """, (new_status, CHANGE_REVIEW_STATUS_MAP[new_status], change_id))
 
     # 로그 기록
     log_cursor = conn.execute("""
@@ -1676,6 +1750,183 @@ def api_update_status(change_id):
         "new_status": new_status,
         "review_log_id": log_cursor.lastrowid,
         "saved": dict(saved) if saved else None,
+    })
+
+
+@app.route("/api/composite/<composite_id>/review", methods=["PATCH"])
+@admin_required
+def api_review_composite(composite_id):
+    """복합 매칭 후보 승인/반려/재검토 상태를 저장한다."""
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get("review_status") or "").strip()
+    note = (data.get("note") or "").strip()
+    if new_status not in COMPOSITE_REVIEW_STATUSES:
+        return jsonify({"error": "invalid composite review status"}), 400
+
+    conn = get_db()
+    row = get_composite_row(conn, composite_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "composite candidate not found"}), 404
+
+    old_status = row["review_status"] or "candidate"
+    related_change_ids = get_composite_change_ids(conn, composite_id)
+    now = now_iso()
+    conn.execute("""
+        UPDATE composite_match_candidate
+        SET review_status = ?,
+            decision_note = ?,
+            reviewed_by_user_id = ?,
+            reviewed_by_email = ?,
+            reviewed_at = ?
+        WHERE composite_id = ?
+    """, (new_status, note, user["user_id"], user["email"], now, composite_id))
+    composite_audit_log(
+        conn,
+        composite_id,
+        "review_status_change",
+        old_status,
+        new_status,
+        note,
+        related_change_ids,
+        user,
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "composite_id": composite_id,
+        "old_status": old_status,
+        "new_status": new_status,
+        "related_change_ids": related_change_ids,
+    })
+
+
+@app.route("/api/composite/<composite_id>/apply", methods=["POST"])
+@admin_required
+def api_apply_composite(composite_id):
+    """승인된 복합 후보를 관련 change 항목의 2차 검수 큐와 메모에 반영한다."""
+    user = current_user()
+    data = request.get_json(silent=True) or {}
+    note = (data.get("note") or "").strip()
+
+    conn = get_db()
+    row = get_composite_row(conn, composite_id)
+    if not row:
+        conn.close()
+        return jsonify({"error": "composite candidate not found"}), 404
+    if row["review_status"] != "approved":
+        conn.close()
+        return jsonify({"error": "approve composite candidate before applying"}), 400
+
+    related_change_ids = get_composite_change_ids(conn, composite_id)
+    if not related_change_ids:
+        conn.close()
+        return jsonify({"error": "no related changes"}), 400
+    if row["applied_at"]:
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "composite_id": composite_id,
+            "already_applied": True,
+            "changed": [],
+            "noted": [],
+            "related_change_ids": related_change_ids,
+        })
+
+    now = now_iso()
+    audit = audit_context(user)
+    applied_note = composite_status_note(row, note)
+    changed = []
+    noted = []
+    for change_id in related_change_ids:
+        current = conn.execute(
+            "SELECT verification_status FROM change_atom WHERE change_id = ?",
+            (change_id,),
+        ).fetchone()
+        if not current:
+            continue
+        old_status = current["verification_status"]
+        if old_status in {"candidate", "deferred"}:
+            new_status = "needs_review"
+            conn.execute("""
+                UPDATE change_atom
+                SET verification_status = ?,
+                    human_review_status = ?
+                WHERE change_id = ?
+            """, (new_status, CHANGE_REVIEW_STATUS_MAP[new_status], change_id))
+            conn.execute("""
+                INSERT INTO review_log (
+                    change_id, action, old_status, new_status, note, reviewer,
+                    actor_user_id, actor_email, actor_role, actor_department,
+                    ip_address, user_agent, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                change_id,
+                "status_change",
+                old_status,
+                new_status,
+                applied_note,
+                audit["actor_email"],
+                audit["actor_user_id"],
+                audit["actor_email"],
+                audit["actor_role"],
+                audit["actor_department"],
+                audit["ip_address"],
+                audit["user_agent"],
+                now,
+            ))
+            changed.append({"change_id": change_id, "old_status": old_status, "new_status": new_status})
+        else:
+            conn.execute("""
+                INSERT INTO review_log (
+                    change_id, action, note, reviewer,
+                    actor_user_id, actor_email, actor_role, actor_department,
+                    ip_address, user_agent, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                change_id,
+                "composite_match",
+                applied_note,
+                audit["actor_email"],
+                audit["actor_user_id"],
+                audit["actor_email"],
+                audit["actor_role"],
+                audit["actor_department"],
+                audit["ip_address"],
+                audit["user_agent"],
+                now,
+            ))
+            noted.append({"change_id": change_id, "status": old_status})
+
+    conn.execute("""
+        UPDATE composite_match_candidate
+        SET applied_by_user_id = ?,
+            applied_by_email = ?,
+            applied_at = ?
+        WHERE composite_id = ?
+    """, (user["user_id"], user["email"], now, composite_id))
+    composite_audit_log(
+        conn,
+        composite_id,
+        "apply_to_changes",
+        row["review_status"],
+        row["review_status"],
+        note,
+        related_change_ids,
+        user,
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({
+        "ok": True,
+        "composite_id": composite_id,
+        "changed": changed,
+        "noted": noted,
+        "related_change_ids": related_change_ids,
     })
 
 

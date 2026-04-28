@@ -131,11 +131,32 @@ $env:AI_MODEL="gemma-2-9b-it"
 - `GET /api/criteria-list` : 준거 목록
 - `GET /api/changes?criterion=&section=&change_type=&status=` : 변경사항 필터 목록
 - `GET /api/change/<change_id>` : 변경사항 상세 + 매칭 후보 + 부서 조치사항
+  - 응답에는 Phase 1.5 복합 매칭 후보(`composite_candidates`)도 포함됩니다.
+  - 복합 후보는 기존 1:1 결과를 덮어쓰지 않고 `many_to_one`, `one_to_many`, `many_to_many` 가능성을 별도로 제시합니다.
+
+### Phase 1.5 복합 매칭
+
+단일 1:1 유사도만으로 설명하기 어려운 통합·분리·재구성 사례를 잡기 위해 `composite_matching.py`를 제공합니다.
+
+```bash
+python composite_matching.py --rebuild --json-summary
+```
+
+이 명령은 `composite_match_candidate`와 `composite_match_link`를 재생성하며, 기존 `change_atom`, `global_match_candidate`, 검토 메모와 상태값은 변경하지 않습니다. 이미 저장된 복합 후보의 검토 상태, 결정 메모, 반영 이력은 같은 `composite_id` 기준으로 보존됩니다.
+대표 사례는 `3주기 1.1 + 1.2 → 4주기 1.1`처럼 복수 원문이 하나의 4주기 원문을 설명하는 경우입니다.
+이미 1:1로 직접 매핑된 항목과 삭제/이동 후보가 같은 4주기 원문으로 통합되는 경우도 `직접매핑+후보 통합 후보`로 함께 탐지합니다.
+또한 `3주기 1.2 발전계획`처럼 한 원 준거가 두 개 이상의 4주기 준거에 나뉘어 연결될 수 있는 경우를 위해 제한적인 `개념 브릿지`를 적용합니다. 이 후보는 자동 확정하지 않고, 상세 화면의 `항목별 귀속 판단`에서 주 귀속·보조 연결·공통 근거·이동/분할 후보를 구분해 표시합니다.
 
 ### 검토 워크플로우
 - `PATCH /api/change/<change_id>/status` : 검토 상태 업데이트
   - `status`: `confirmed | needs_review | rejected | deferred`
   - 관리자 전용, `X-CSRF-Token` 필요
+- `PATCH /api/composite/<composite_id>/review` : 복합 매칭 후보 검토 상태 저장
+  - `review_status`: `candidate | approved | rejected | needs_review`
+  - 관리자 전용, `composite_match_log`에 승인/반려/재검토 이력을 저장
+- `POST /api/composite/<composite_id>/apply` : 승인된 복합 후보를 관련 변경항목에 반영
+  - `candidate` 또는 `deferred` 상태의 관련 항목은 `needs_review`로 이동
+  - 이미 확정/반려/검토필요 상태인 항목은 상태를 덮어쓰지 않고 `composite_match` 메모만 남김
 - `POST /api/change/<change_id>/note` : 검토 메모 추가
   - 관리자는 일반 메모(`note`), 부서 담당자는 부서 의견(`department_note`)으로 감사로그에 저장
 - `GET /api/change/<change_id>/history` : 검토 이력 조회 (`review_log`)

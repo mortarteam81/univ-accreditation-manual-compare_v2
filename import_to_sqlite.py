@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+from composite_matching import rebuild_composite_matches
+
 # Windows cp949 인코딩 문제 방지
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -551,6 +553,15 @@ def main():
 
     # ── 뷰 생성 ──
     create_views(conn)
+
+    # ── Phase 1.5 복합 매칭 후보 생성 ──
+    composite_summary = rebuild_composite_matches(conn)
+    composite_link_count = conn.execute("SELECT COUNT(*) FROM composite_match_link").fetchone()[0]
+    stats["total_tables"] += 2
+    stats["table_counts"]["composite_match_candidate"] = composite_summary["total"]
+    stats["table_counts"]["composite_match_link"] = composite_link_count
+    stats["total_rows"] += composite_summary["total"]
+    stats["total_rows"] += composite_link_count
 
     # ── 메타 테이블 ──
     create_meta_table(conn, stats)
